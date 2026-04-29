@@ -1,0 +1,29 @@
+repos:
+  - repo: https://github.com/psf/black
+    rev: 22.12.0
+    hooks:
+      - id: black
+        language_version: python3
+
+  - repo: local
+    hooks:
+      - id: pylint
+        name: pylint
+        entry: pylint
+        language: system
+        types: [python]
+        args: [--max-line-length=120]
+
+      - id: clean-logs
+        name: clean-logs
+        entry: bash -c 'find logs -type d -name "run_*" -exec rm -rf {} + 2>/dev/null || true; echo "✓ Cleaned up log directories"'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: clean-integration-test-logs
+        name: clean-integration-test-logs
+        entry: bash -c 'find logs tests/integration/logs -type d -name "run_*" -exec rm -rf {} + 2>/dev/null || true; echo "✓ Cleaned up log directories"'
+        language: system
+        pass_filenames: false
+        always_run: true

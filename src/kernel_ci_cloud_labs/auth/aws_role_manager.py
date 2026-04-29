@@ -1,0 +1,93 @@
+"""AWS IAM role management for Fargate tasks"""
+
+__authors__ = ["Max Hubmann <mxhbm@amazon.de>", "Norbert Manthey <nmanthey@amazon.de>"]
+__copyright__ = "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved."
+# SPDX-License-Identifier: Apache-2.0
+
+
+import json
+from typing import Any, Dict
+
+from kernel_ci_cloud_labs.core.base_resource_manager import BaseResourceManager
+
+
+class AWSRoleManager(BaseResourceManager):
+    """Manages IAM roles required for AWS Fargate operations"""
+
+    def check_exists(self, resource_name: str) -> bool:
+        """Check if IAM role exists"""
+        try:
+            self.client.get_role(RoleName=resource_name)
+            return True
+        except self.client.exceptions.NoSuchEntityException:
+            return False
+
+    def delete_role(self, resource_name: str) -> None:
+        """Delete IAM role and detach policies"""
+        try:
+            # Detach managed policies
+            response = self.client.list_attached_role_policies(RoleName=resource_name)
+            for policy in response.get("AttachedPolicies", []):
+                self.client.detach_role_policy(RoleName=resource_name, PolicyArn=policy["PolicyArn"])
+
+            # Delete inline policies
+            inline_response = self.client.list_role_policies(RoleName=resource_name)
+            for policy_name in inline_response.get("PolicyNames", []):
+                self.client.delete_role_policy(RoleName=resource_name, PolicyName=policy_name)
+
+            # Delete instance profile if exists
+            try:
+                self.client.remove_role_from_instance_profile(InstanceProfileName=resource_name, RoleName=resource_name)
+                self.client.delete_instance_profile(InstanceProfileName=resource_name)
+            except self.client.exceptions.NoSuchEntityException:
+                pass
+
+            # Delete role
+            self.client.delete_role(RoleName=resource_name)
+        except self.client.exceptions.NoSuchEntityException:
+            pass
+
+    def create(self, resource_name: str, resource_config: Dict[str, Any]) -> str:
+        """Create IAM role with policies and instance profile if needed"""
+        # Create role
+        response = self.client.create_role(
+            RoleName=resource_name,
+            AssumeRolePolicyDocument=json.dumps(resource_config["trust_policy"]),
+            Description=resource_config.get("description", ""),
+        )
+
+        # Attach managed policies
+        for policy_arn in resource_config.get("policies", []):
+            self.client.attach_role_policy(RoleName=resource_name, PolicyArn=policy_arn)
+
+        # Add inline policies
+        for policy_name, policy_doc in resource_config.get("inline_policies", {}).items():
+            self.client.put_role_policy(
+                RoleName=resource_name,
+                PolicyName=policy_name,
+                PolicyDocument=json.dumps(policy_doc),
+            )
+
+        # Create instance profile for EC2 roles
+        trust_policy = resource_config.get("trust_policy", {})
+        principals = trust_policy.get("Statement", [{}])[0].get("Principal", {})
+        if isinstance(principals, dict) and "ec2.amazonaws.com" in str(principals):
+            try:
+                self.client.create_instance_profile(InstanceProfileName=resource_name)
+                self.client.add_role_to_instance_profile(InstanceProfileName=resource_name, RoleName=resource_name)
+            except self.client.exceptions.EntityAlreadyExistsException:
+                pass
+
+        return response["Role"]["Arn"]
+
+    def get_identifier(self, resource_name: str) -> str:
+        """Get role ARN"""
+        response = self.client.get_role(RoleName=resource_name)
+        return response["Role"]["Arn"]
+
+    def ensure_all_roles(self) -> Dict[str, str]:
+        """Ensure all configured roles exist"""
+        role_arns = {}
+        for role_name, role_config in self.config.items():
+            role_arns[role_name] = self.ensure_exists(role_name, role_config)
+        return role_arns

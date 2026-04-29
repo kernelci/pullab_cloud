@@ -1,0 +1,6 @@
+# Packages required to run this test
+perl-Time-HiRes
+perl-FindBin
+make
+gcc
+tar
