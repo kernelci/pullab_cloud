@@ -200,6 +200,17 @@
     },
     "metrics_namespace": "kernel-ci-exampleuser-metrics"
   },
+  "kernelci": {
+    "api_base_uri": "https://staging.kernelci.org:9000/latest",
+    "api_token": null,
+    "runtime_name": "pull-labs-aws-ec2",
+    "poll_interval_sec": 30,
+    "cursor_file": "/tmp/pullab_cloud_cursor.json",
+    "kcidb_submit_url": "https://kcidb-restd.example.org/submit",
+    "kcidb_origin": "pullab_cloud_aws",
+    "kcidb_jwt": null,
+    "comment": "kcidb_jwt and api_token are normally provided via the KCIDB_JWT / KERNELCI_API_TOKEN env vars; leave null in the file and inject at runtime."
+  },
   "test_config": {
     "test_id": "test-all-tests",
     "role_name": "kernel-ci-exampleuser-ecs-role",

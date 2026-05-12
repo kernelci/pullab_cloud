@@ -1,4 +1,6 @@
-.PHONY: help install install-dev test lint format type-check clean build release docs docs-clean
+.PHONY: help install install-dev test lint format type-check clean build release docs docs-clean poller poller-once
+
+CONFIG ?= examples/aws/config.json
 
 help:
 	@echo "Available targets:"
@@ -13,6 +15,14 @@ help:
 	@echo "  clean        - Clean build artifacts"
 	@echo "  build        - Build the package"
 	@echo "  release      - Build and check the package for release"
+	@echo "  poller       - Run the kernelci pull-lab poller (long-lived)"
+	@echo "  poller-once  - Run a single poll cycle and exit"
+
+poller:
+	python -m kernel_ci_cloud_labs.pull_labs_poller --config $(CONFIG)
+
+poller-once:
+	python -m kernel_ci_cloud_labs.pull_labs_poller --config $(CONFIG) --once
 
 install: build test
 	pip install -e .
