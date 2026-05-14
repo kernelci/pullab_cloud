@@ -577,7 +577,7 @@ def run_pipeline(
             "region": provider.config.get("region", "") if "provider" in locals() else "",
             "s3_client": s3_client,
         }
-    create_summary(
+    return create_summary(
         run_dir,
         start_time,
         task_arn if "task_arn" in locals() else None,
