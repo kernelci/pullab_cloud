@@ -443,7 +443,7 @@ EOF
     echo "$(date): [RUN_ID:$RUN_ID] Initiating shutdown"
     # This provides a fallback in case the script exits but instance doesn't terminate
     SHUTDOWN_DELAY=$((5))
-    sudo shutdown +$(SHUTDOWN_DELAY) "Scheduled shutdown: Test completed. Shutting down in ${SHUTDOWN_DELAY} minutes to prevent orphaned instance."
+    sudo shutdown +${SHUTDOWN_DELAY} "Scheduled shutdown: Test completed. Shutting down in ${SHUTDOWN_DELAY} minutes to prevent orphaned instance."
 
     # Exit with the appropriate exit code
     # The shutdown is scheduled but script exits immediately with proper status
