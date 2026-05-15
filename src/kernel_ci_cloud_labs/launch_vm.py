@@ -222,7 +222,7 @@ echo "✓ SSM agent is ready"
         test_params_cmd = ""
         if self.test_params:
             for key, value in self.test_params.items():
-                test_params_cmd += f"export TEST_{key.upper()}={shlex.quote(str(value))}\n"
+                test_params_cmd += f"export {key.upper()}={shlex.quote(str(value))}\n"
 
         command = f"""#!/bin/bash
 set -x
