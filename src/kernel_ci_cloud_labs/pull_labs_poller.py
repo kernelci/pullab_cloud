@@ -55,6 +55,10 @@ DEFAULT_CURSOR_FILE = "/tmp/pullab_cloud_cursor.json"  # nosec B108
 ENV_API_BASE_URI = "KERNELCI_API_BASE_URI"
 ENV_API_TOKEN = "KERNELCI_API_TOKEN"
 ENV_RUNTIME_NAME = "KERNELCI_RUNTIME_NAME"
+# Optional comma-separated allowlist of node.data.platform values. When set,
+# events whose platform isn't in the list are skipped — useful for running
+# parallel pollers on the same runtime label but distinct hardware.
+ENV_PLATFORMS = "KERNELCI_PLATFORMS"
 ENV_KCIDB_URL = "KCIDB_SUBMIT_URL"
 ENV_KCIDB_JWT = "KCIDB_JWT"
 ENV_KCIDB_ORIGIN = "KCIDB_ORIGIN"
@@ -239,6 +243,7 @@ class PullLabsPoller:
             os.getenv(ENV_RUNTIME_NAME) or kc.get("runtime_name"),
             "kernelci.runtime_name",
         )
+        self.platforms: Optional[List[str]] = self._resolve_platforms(kc)
         # Resolution order for the KCIDB endpoint + token, matching kci-dev's
         # priority: explicit URL+JWT > KCIDB_REST combined env > config values.
         kcidb_url, kcidb_jwt = self._resolve_kcidb_endpoint(kc)
@@ -320,8 +325,29 @@ class PullLabsPoller:
 
     def _matches_runtime(self, event: Dict[str, Any]) -> bool:
         node = event.get("node") or {}
-        data = (node.get("data") or {}).get("data") or {}
+        data = node.get("data") or {}
         return data.get("runtime") == self.runtime_name
+
+    def _matches_platform(self, event: Dict[str, Any]) -> bool:
+        if not self.platforms:
+            return True
+        node = event.get("node") or {}
+        data = node.get("data") or {}
+        return data.get("platform") in self.platforms
+
+    @staticmethod
+    def _resolve_platforms(kc: Dict[str, Any]) -> Optional[List[str]]:
+        raw = os.getenv(ENV_PLATFORMS)
+        if raw is None:
+            raw = kc.get("platforms")
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            items = [p.strip() for p in raw.split(",")]
+        else:
+            items = [str(p).strip() for p in raw]
+        items = [p for p in items if p]
+        return items or None
 
     def _job_definition_url(self, event: Dict[str, Any]) -> Optional[str]:
         node = event.get("node") or {}
@@ -367,6 +393,10 @@ class PullLabsPoller:
 
         if not self._matches_runtime(event):
             logger.debug("Skipping event %s: runtime mismatch", node_id)
+            return True
+
+        if not self._matches_platform(event):
+            logger.debug("Skipping event %s: platform mismatch", node_id)
             return True
 
         jobdef_url = self._job_definition_url(event)

@@ -204,12 +204,13 @@
     "api_base_uri": "https://staging.kernelci.org:9000/latest",
     "api_token": null,
     "runtime_name": "pull-labs-aws-ec2",
+    "platforms": ["aws-ec2-x86_64"],
     "poll_interval_sec": 30,
     "cursor_file": "/tmp/pullab_cloud_cursor.json",
     "kcidb_submit_url": "https://db.kernelci.org/submit",
     "kcidb_origin": "pullab_cloud_aws",
     "kcidb_jwt": null,
-    "comment": "kcidb_jwt and api_token are normally provided via the KCIDB_JWT / KERNELCI_API_TOKEN env vars (or UNIFIED_TOKEN as a shared fallback for both); leave null in the file and inject at runtime."
+    "comment": "x86_64 variant. Shares runtime_name 'pull-labs-aws-ec2' with the arm64 config; platforms filter narrows to x86_64 jobs. Remove 'platforms' to accept any AWS pull-lab job. kcidb_jwt and api_token are normally provided via the KCIDB_JWT / KERNELCI_API_TOKEN env vars (or UNIFIED_TOKEN as a shared fallback for both); leave null in the file and inject at runtime."
   },
   "test_config": {
     "test_id": "test-all-tests",
