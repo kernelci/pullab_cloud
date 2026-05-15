@@ -89,6 +89,7 @@ variables, not committed to the file:
 | `KERNELCI_API_BASE_URI` | `kernelci.api_base_uri` | API URL |
 | `KERNELCI_API_TOKEN` | `kernelci.api_token` | Bearer token for the API (optional for public endpoints) |
 | `KERNELCI_RUNTIME_NAME` | `kernelci.runtime_name` | Lab/runtime to consume jobs for |
+| `KERNELCI_PLATFORMS` | `kernelci.platforms` | Comma-separated allowlist of `node.data.platform` values. Optional; used to split one runtime label across multiple pollers (e.g. arm64 vs x86_64). Omit to accept any platform. |
 | `KCIDB_SUBMIT_URL` | `kernelci.kcidb_submit_url` | kcidb-restd-rs submit URL |
 | `KCIDB_JWT` | `kernelci.kcidb_jwt` | JWT bearer token |
 | `KCIDB_REST` | (alternative to the two above) | `https://<token>@host[/path]` — kci-dev-compatible single URL carrying both endpoint and token |

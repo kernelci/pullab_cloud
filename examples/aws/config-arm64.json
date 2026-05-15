@@ -203,13 +203,14 @@
   "kernelci": {
     "api_base_uri": "https://staging.kernelci.org:9000/latest",
     "api_token": null,
-    "runtime_name": "pull-labs-aws-ec2-arm64",
+    "runtime_name": "pull-labs-aws-ec2",
+    "platforms": ["aws-ec2-arm64"],
     "poll_interval_sec": 30,
     "cursor_file": "/tmp/pullab_cloud_cursor_arm64.json",
     "kcidb_submit_url": "https://db.kernelci.org/submit",
     "kcidb_origin": "pullab_cloud_aws_arm64",
     "kcidb_jwt": null,
-    "comment": "arm64 (Graviton) variant. kcidb_jwt and api_token are normally provided via the KCIDB_JWT / KERNELCI_API_TOKEN env vars (or UNIFIED_TOKEN as a shared fallback for both); leave null in the file and inject at runtime."
+    "comment": "arm64 (Graviton) variant. Shares runtime_name 'pull-labs-aws-ec2' with the x86 config; platforms filter narrows to arm64 jobs. kcidb_jwt and api_token are normally provided via the KCIDB_JWT / KERNELCI_API_TOKEN env vars (or UNIFIED_TOKEN as a shared fallback for both); leave null in the file and inject at runtime."
   },
   "test_config": {
     "test_id": "test-all-tests",
