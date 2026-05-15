@@ -203,21 +203,21 @@
   "kernelci": {
     "api_base_uri": "https://staging.kernelci.org:9000/latest",
     "api_token": null,
-    "runtime_name": "pull-labs-aws-ec2",
+    "runtime_name": "pull-labs-aws-ec2-arm64",
     "poll_interval_sec": 30,
-    "cursor_file": "/tmp/pullab_cloud_cursor.json",
+    "cursor_file": "/tmp/pullab_cloud_cursor_arm64.json",
     "kcidb_submit_url": "https://db.kernelci.org/submit",
-    "kcidb_origin": "pullab_cloud_aws",
+    "kcidb_origin": "pullab_cloud_aws_arm64",
     "kcidb_jwt": null,
-    "comment": "kcidb_jwt and api_token are normally provided via the KCIDB_JWT / KERNELCI_API_TOKEN env vars (or UNIFIED_TOKEN as a shared fallback for both); leave null in the file and inject at runtime."
+    "comment": "arm64 (Graviton) variant. kcidb_jwt and api_token are normally provided via the KCIDB_JWT / KERNELCI_API_TOKEN env vars (or UNIFIED_TOKEN as a shared fallback for both); leave null in the file and inject at runtime."
   },
   "test_config": {
     "test_id": "test-all-tests",
     "role_name": "kernel-ci-exampleuser-ecs-role",
     "vms": [
       {
-        "ami_id": "resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64",
-        "instance_type": "c5a.4xlarge",
+        "ami_id": "resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64",
+        "instance_type": "c7g.4xlarge",
         "root_volume_size": 40,
         "max_runtime": 3600,
         "test": [
@@ -226,8 +226,8 @@
         "min_count": 1
       },
       {
-        "ami_id": "resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64",
-        "instance_type": "c5a.4xlarge",
+        "ami_id": "resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64",
+        "instance_type": "c7g.4xlarge",
         "root_volume_size": 40,
         "max_runtime": 3600,
         "test": [

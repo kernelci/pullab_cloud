@@ -62,6 +62,10 @@ ENV_KCIDB_ORIGIN = "KCIDB_ORIGIN"
 # https://<token>@<host>[:<port>][/path][/submit]. Used when KCIDB_SUBMIT_URL /
 # KCIDB_JWT are not both set.
 ENV_KCIDB_REST = "KCIDB_REST"
+# Shared fallback when the KernelCI API token and the KCIDB JWT are the same
+# value (common in single-credential deployments). Lower priority than the
+# dedicated env vars but higher than config-file values.
+ENV_UNIFIED_TOKEN = "UNIFIED_TOKEN"
 ENV_CURSOR_FILE = "PULLAB_CURSOR_FILE"
 ENV_POLL_INTERVAL = "PULLAB_POLL_INTERVAL_SEC"
 ENV_BASE_CONFIG = "PULLAB_BASE_CONFIG"
@@ -226,7 +230,11 @@ class PullLabsPoller:
             os.getenv(ENV_API_BASE_URI) or kc.get("api_base_uri"),
             "kernelci.api_base_uri",
         )
-        self.api_token: Optional[str] = os.getenv(ENV_API_TOKEN) or kc.get("api_token")
+        self.api_token: Optional[str] = (
+            os.getenv(ENV_API_TOKEN)
+            or os.getenv(ENV_UNIFIED_TOKEN)
+            or kc.get("api_token")
+        )
         self.runtime_name: str = _required(
             os.getenv(ENV_RUNTIME_NAME) or kc.get("runtime_name"),
             "kernelci.runtime_name",
@@ -237,7 +245,7 @@ class PullLabsPoller:
         self.kcidb_submit_url: str = _required(kcidb_url, "kernelci.kcidb_submit_url")
         self.kcidb_jwt: str = _required(
             kcidb_jwt,
-            "kernelci.kcidb_jwt (env KCIDB_JWT or KCIDB_REST=https://<token>@host/submit)",
+            "kernelci.kcidb_jwt (env KCIDB_JWT, KCIDB_REST=https://<token>@host/submit, or UNIFIED_TOKEN)",
         )
         self.kcidb_origin: str = _required(
             os.getenv(ENV_KCIDB_ORIGIN) or kc.get("kcidb_origin"),
@@ -268,7 +276,9 @@ class PullLabsPoller:
           1. KCIDB_SUBMIT_URL + KCIDB_JWT env vars (both set).
           2. KCIDB_REST env var (kci-dev compatibility,
              format https://<token>@host/submit).
-          3. config.json: kernelci.kcidb_submit_url + kernelci.kcidb_jwt.
+          3. UNIFIED_TOKEN env var as the JWT, paired with KCIDB_SUBMIT_URL
+             if set otherwise the config submit URL.
+          4. config.json: kernelci.kcidb_submit_url + kernelci.kcidb_jwt.
         """
         env_url = os.getenv(ENV_KCIDB_URL)
         env_jwt = os.getenv(ENV_KCIDB_JWT)
@@ -283,6 +293,9 @@ class PullLabsPoller:
                 "KCIDB_REST is set but could not be parsed — "
                 "expected https://<token>@host/submit"
             )
+        unified = os.getenv(ENV_UNIFIED_TOKEN)
+        if unified:
+            return env_url or kc.get("kcidb_submit_url"), unified
         return kc.get("kcidb_submit_url"), kc.get("kcidb_jwt")
 
     # -- Polling --------------------------------------------------------

@@ -19,10 +19,10 @@ help:
 	@echo "  poller-once  - Run a single poll cycle and exit"
 
 poller:
-	python -m kernel_ci_cloud_labs.pull_labs_poller --config $(CONFIG)
+	PYTHONPATH=src$${PYTHONPATH:+:$$PYTHONPATH} python -m kernel_ci_cloud_labs.pull_labs_poller --config $(CONFIG)
 
 poller-once:
-	python -m kernel_ci_cloud_labs.pull_labs_poller --config $(CONFIG) --once
+	PYTHONPATH=src$${PYTHONPATH:+:$$PYTHONPATH} python -m kernel_ci_cloud_labs.pull_labs_poller --config $(CONFIG) --once
 
 install: build test
 	pip install -e .
