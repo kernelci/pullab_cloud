@@ -75,7 +75,7 @@ added alongside `test_config`:
   "runtime_name":    "pull-labs-aws-ec2",
   "poll_interval_sec": 30,
   "cursor_file":     "/tmp/pullab_cloud_cursor.json",
-  "kcidb_submit_url":"https://kcidb-restd.example.org/submit",
+  "kcidb_submit_url":"https://db.kernelci.org/submit",
   "kcidb_origin":    "pullab_cloud_aws",
   "kcidb_jwt":       null
 }
@@ -92,6 +92,7 @@ variables, not committed to the file:
 | `KCIDB_SUBMIT_URL` | `kernelci.kcidb_submit_url` | kcidb-restd-rs submit URL |
 | `KCIDB_JWT` | `kernelci.kcidb_jwt` | JWT bearer token |
 | `KCIDB_REST` | (alternative to the two above) | `https://<token>@host[/path]` — kci-dev-compatible single URL carrying both endpoint and token |
+| `UNIFIED_TOKEN` | (fallback for `KERNELCI_API_TOKEN` *and* `KCIDB_JWT`) | Single token used for both when the dedicated env vars aren't set. Lower priority than the specific vars, higher than config-file values. |
 | `KCIDB_ORIGIN` | `kernelci.kcidb_origin` | Origin string in submitted rows |
 | `PULLAB_CURSOR_FILE` | `kernelci.cursor_file` | Where to persist the poll cursor |
 | `PULLAB_POLL_INTERVAL_SEC` | `kernelci.poll_interval_sec` | Sleep between empty polls |
