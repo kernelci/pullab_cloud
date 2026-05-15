@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
+from kernel_ci_cloud_labs import pull_labs_poller as poller_mod
 from kernel_ci_cloud_labs.pull_labs_poller import (
     DEFAULT_FROM_TIMESTAMP,
     FileCursorStore,
@@ -19,6 +20,10 @@ from kernel_ci_cloud_labs.pull_labs_poller import (
     _extract_test_results,
     _parse_kcidb_rest,
 )
+
+# Capture the real validator at import time so a specific test can restore it
+# after the autouse fixture has stubbed it out.
+_REAL_VALIDATE_DEFAULT_EXECUTOR_DEPS = poller_mod._validate_default_executor_deps
 
 
 # ---------------------------------------------------------------------------
@@ -35,6 +40,17 @@ def _clear_kernelci_env(monkeypatch):
         "PULLAB_CURSOR_FILE", "PULLAB_POLL_INTERVAL_SEC", "PULLAB_BASE_CONFIG",
     ]:
         monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _skip_default_executor_deps_check(monkeypatch):
+    """Bypass the boto3/AWS-package import check the poller runs at startup.
+
+    The construction tests don't exercise the default executor and should not
+    depend on boto3 being installed in the test environment. Dedicated tests
+    for the validator itself temporarily restore the real function.
+    """
+    monkeypatch.setattr(poller_mod, "_validate_default_executor_deps", lambda: None)
 
 
 def _minimal_kc(**overrides):
@@ -263,3 +279,46 @@ class TestExtractTestResults:
         rows, log = _extract_test_results({})
         assert rows == []
         assert log is None
+
+
+# ---------------------------------------------------------------------------
+# Default-executor dependency validation
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultExecutorDepsValidation:
+    """Cover the startup check that runs when no custom job_executor is set."""
+
+    def test_missing_boto3_raises_systemexit(self, monkeypatch):
+        # Put back the real validator (autouse fixture stubbed it out).
+        monkeypatch.setattr(
+            poller_mod,
+            "_validate_default_executor_deps",
+            _REAL_VALIDATE_DEFAULT_EXECUTOR_DEPS,
+        )
+        # Force the boto3 import inside the validator to fail.
+        import builtins
+        real_import = builtins.__import__
+
+        def _fail_boto3(name, *args, **kwargs):
+            if name == "boto3":
+                raise ImportError("boto3 not installed (simulated)")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _fail_boto3)
+        with pytest.raises(SystemExit) as ei:
+            PullLabsPoller(_minimal_kc())
+        assert "boto3" in str(ei.value)
+
+    def test_custom_executor_skips_validation(self, monkeypatch):
+        """Passing a custom executor must NOT trigger the boto3 check."""
+        called = {"validator": False}
+
+        def _fail_if_called():
+            called["validator"] = True
+            raise SystemExit("validator should not have been called")
+
+        monkeypatch.setattr(poller_mod, "_validate_default_executor_deps", _fail_if_called)
+        # Custom executor — validator must be skipped, no SystemExit.
+        PullLabsPoller(_minimal_kc(), job_executor=lambda cfg: ([], None))
+        assert called["validator"] is False

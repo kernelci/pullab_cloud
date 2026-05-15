@@ -15,6 +15,11 @@ This package provides the kernel-ci-cloud-runner python application as an entry 
 
 ## Installation
 
+**Python 3.11 is required.** Older interpreters (including the `python3` shipped
+by Amazon Linux 2023, which is 3.9) are not supported — `pip install -e .` will
+refuse to run on them. On AL2023, install `python3.11 python3.11-pip
+python3.11-devel`; see [AWS_INSTALL.md](AWS_INSTALL.md) for the full host setup.
+
 Run the package in a virtual environment. We also provide the script "tests/test-in-venv.sh" to wrap these steps in en environment.
 
 If you do not have the code already, get your copy (git URL to be defined).
@@ -27,21 +32,21 @@ cd kernel-ci-cloud-labs
 Setup virtual environment:
 
 ```bash
-# Create virtual environment
-python3 -m venv .venv
+# Create virtual environment (Python 3.11 required)
+python3.11 -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
 # Install package (runtime only - boto3)
-pip install -e .
+python3.11 -m pip install -e .
 
 # Optional: Install with dev dependencies (pytest, black, pylint, pre-commit, pytest-cov)
-pip install -e ".[dev]"
+python3.11 -m pip install -e ".[dev]"
 
 # Optional: Install with analysis dependencies (pandas, matplotlib, seaborn)
-pip install -e ".[analysis]"
+python3.11 -m pip install -e ".[analysis]"
 
 # Recommended: Install everything (dev + analysis)
-pip install -e ".[dev,analysis]"
+python3.11 -m pip install -e ".[dev,analysis]"
 
 # Optional: Install pre-commit hooks (only if you plan to commit code)
 pre-commit install
@@ -193,9 +198,9 @@ If not done already, set this up once:
 
 ```bash
 cd kernel-ci-cloud-labs
-python3 -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+python3.11 -m pip install -e .
 ```
 
 Activate the virtual environment. After this, `kernel-ci-cloud-runner` is available in your shell.
@@ -609,7 +614,7 @@ kernel-ci-cloud-runner aws analyze \
 
 This downloads all `benchmark-*.csv` files from S3, combines them, compares the two kernel versions, and generates regression plots (overall, x86_64, ARM64) in `analysis/data/{run_prefix}/`. Add `--upload-analysis` to upload the results back to S3.
 
-Requires the analysis dependencies: `pip install -e ".[analysis]"`
+Requires the analysis dependencies: `python3.11 -m pip install -e ".[analysis]"`
 
 ## Automated Triggering via EventBridge
 

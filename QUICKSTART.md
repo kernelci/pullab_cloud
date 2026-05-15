@@ -19,11 +19,11 @@ provision AWS resources on its own. Before continuing, make sure the
 pipeline can run a job end-to-end. The full walkthrough lives in
 [`README.md`](README.md); the minimum steps are:
 
-1. **Install the package** in a venv — see
+1. **Install the package** in a venv — Python 3.11 required, see
    [README → Installation](README.md#installation):
    ```bash
-   python3 -m venv .venv && source .venv/bin/activate
-   pip install -e .
+   python3.11 -m venv .venv && source .venv/bin/activate
+   python3.11 -m pip install -e .
    ```
 2. **Configure AWS credentials** — see
    [README 1. Configure AWS Credentials](README.md#1-configure-aws-credentials).

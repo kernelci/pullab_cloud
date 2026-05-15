@@ -27,7 +27,7 @@ setup(
     long_description=long_description,
     package_dir={"": "src"},
     packages=find_packages(where="src"),
-    python_requires=">=3.7",
+    python_requires=">=3.11",
     install_requires=[
         "boto3>=1.26.0",
     ],
