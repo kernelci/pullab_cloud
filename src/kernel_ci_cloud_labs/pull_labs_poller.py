@@ -158,6 +158,46 @@ class FileCursorStore:
 JobExecutor = Callable[[Dict[str, Any]], Tuple[List[Dict[str, Any]], Optional[str]]]
 
 
+_DEFAULT_EXECUTOR_PACKAGES = (
+    "kernel_ci_cloud_labs.providers",
+    "kernel_ci_cloud_labs.storage",
+    "kernel_ci_cloud_labs.auth",
+)
+
+
+def _validate_default_executor_deps() -> None:
+    """Eagerly import everything the default executor will need.
+
+    Called from PullLabsPoller.__init__ when no custom job_executor is
+    supplied, so a missing runtime dep (boto3, an un-installed package)
+    surfaces at startup instead of on the first event hours later. Raises
+    SystemExit with a single combined message listing every problem found.
+    """
+    from kernel_ci_cloud_labs.main import import_all_packages  # noqa: PLC0415
+
+    problems: List[str] = []
+    try:
+        import boto3  # noqa: F401,PLC0415
+    except ImportError as e:
+        problems.append(
+            f"boto3 import failed ({e}) — run: python3.11 -m pip install -e ."
+        )
+
+    for pkg in _DEFAULT_EXECUTOR_PACKAGES:
+        try:
+            import_all_packages(pkg)
+        except ImportError as e:
+            problems.append(f"{pkg} import failed: {e}")
+
+    if problems:
+        raise SystemExit(
+            "Default job executor dependencies are not installed:\n  - "
+            + "\n  - ".join(problems)
+            + "\nFix the install on this host, or pass a custom job_executor "
+              "to PullLabsPoller if you don't need the AWS pipeline."
+        )
+
+
 def _default_job_executor(run_config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     """Invoke the existing pipeline (provider-pluggable via registry).
 
@@ -175,11 +215,7 @@ def _default_job_executor(run_config: Dict[str, Any]) -> Tuple[List[Dict[str, An
     )
     from kernel_ci_cloud_labs.main import import_all_packages  # noqa: PLC0415
 
-    for pkg in [
-        "kernel_ci_cloud_labs.providers",
-        "kernel_ci_cloud_labs.storage",
-        "kernel_ci_cloud_labs.auth",
-    ]:
+    for pkg in _DEFAULT_EXECUTOR_PACKAGES:
         import_all_packages(pkg)
 
     auth_class = AUTH_REGISTRY[run_config["auth_credentials"]["auth_provider"]]
@@ -268,6 +304,9 @@ class PullLabsPoller:
         self.cursor_store = cursor_store or FileCursorStore(cursor_path)
         self.job_executor: JobExecutor = job_executor or _default_job_executor
         self.base_config: Dict[str, Any] = config
+
+        if job_executor is None:
+            _validate_default_executor_deps()
 
     # -- Credential resolution -------------------------------------------
 

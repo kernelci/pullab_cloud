@@ -25,10 +25,10 @@ poller-once:
 	PYTHONPATH=src$${PYTHONPATH:+:$$PYTHONPATH} python -m kernel_ci_cloud_labs.pull_labs_poller --config $(CONFIG) --once
 
 install: build test
-	pip install -e .
+	python3.11 -m pip install -e .
 
 install-dev:
-	pip install -e ".[dev,test]"
+	python3.11 -m pip install -e ".[dev,test]"
 
 test:
 	python -m pytest tests/ -m "not integration"
