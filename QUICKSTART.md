@@ -46,6 +46,16 @@ pipeline can run a job end-to-end. The full walkthrough lives in
    Look for `VMs: 2/2 spawned, 2 successful, 0 failed`. If this passes,
    the AWS side is ready and you can proceed below.
 
+   For a fast pre-flight check (no VMs spawned) of AWS permissions,
+   the results bucket, and KernelCI/KCIDB tokens, run:
+   ```bash
+   kernel-ci-cloud-runner aws setup validate \
+     --bucket kernel-ci-$USER-results --role kernel-ci-$USER-vm-role
+   ```
+   See [README → Validate setup](README.md#validate-setup-optional). The
+   `KERNELCI_API_TOKEN` / `KCIDB_JWT` / `UNIFIED_TOKEN` env vars set in
+   section 3 below are picked up automatically.
+
 If your jobs install custom kernels, also follow
 [README 4. Upload kernel RPMs](README.md#4-upload-kernel-rpms-required-for-kernel-install-tests).
 
