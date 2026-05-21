@@ -234,6 +234,26 @@ def _default_job_executor(run_config: Dict[str, Any]) -> Tuple[List[Dict[str, An
     return _extract_test_results(summary or {})
 
 
+# Pipeline/PULL_LABS test names that denote a kernel boot test. The dashboard
+# classifies a KCIDB test as a "boot" (rather than a generic test) only when
+# its path is exactly "boot" or starts with "boot." -- see is_boot() in the
+# kernelci-dashboard backend (kernelCI_app/utils.py). Every pullab_cloud job is
+# a url-kernel-boot job, so these names are remapped to the "boot" path on
+# submission. "baseline" is the PULL_LABS test type; "url-kernel-boot" is the
+# vm-tests directory name it translates to and which appears in pipeline logs.
+_BOOT_TEST_NAMES = frozenset({"baseline", "url-kernel-boot", "boot"})
+
+
+def _test_name_to_path(name: str) -> str:
+    """Map a pipeline test name to a KCIDB test path.
+
+    Boot tests are remapped to the "boot" path so the dashboard classifies
+    them as boots; every other name passes through unchanged (build_test_row
+    then verifies it is a KCIDB-valid path and raises if it is not).
+    """
+    return "boot" if name.strip().lower() in _BOOT_TEST_NAMES else name
+
+
 def _extract_test_results(summary: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     """Pull per-test status out of the summary dict returned by run_pipeline.
 
@@ -246,7 +266,7 @@ def _extract_test_results(summary: Dict[str, Any]) -> Tuple[List[Dict[str, Any]]
     failed_by_test = vms.get("failed_by_test") or {}
     for name in test_names:
         status = "FAIL" if failed_by_test.get(name) else "PASS"
-        rows.append({"name": name, "status": status})
+        rows.append({"name": _test_name_to_path(name), "status": status})
     return rows, None
 
 
@@ -470,8 +490,9 @@ class PullLabsPoller:
             per_test, log_url = self.job_executor(run_config)
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("Job execution failed for node %s: %s", node_id, e, exc_info=True)
-            # Submit an ERROR row so KCIDB sees we picked it up.
-            per_test = [{"name": "infrastructure", "status": "ERROR"}]
+            # Submit an ERROR row so KCIDB sees we picked it up. The boot.
+            # prefix makes the dashboard classify it as a (failed) boot test.
+            per_test = [{"name": "boot.infrastructure", "status": "ERROR"}]
             log_url = None
 
         test_rows = [
@@ -493,7 +514,9 @@ class PullLabsPoller:
                     origin=self.kcidb_origin,
                     build_id=build_id,
                     test_id=f"{node_id}.0",
-                    path="pullab_cloud",
+                    # "boot" path => the dashboard classifies this as a boot
+                    # test (is_boot() in kernelCI_app/utils.py).
+                    path="boot",
                     status="ERROR",
                     log_url=log_url,
                     misc={

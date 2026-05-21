@@ -17,6 +17,7 @@ node tree.
 
 import json
 import logging
+import re
 import urllib.error
 import urllib.request
 from typing import Any, Dict, Iterable, List, Optional
@@ -50,6 +51,54 @@ def to_kcidb_status(raw: Optional[str]) -> str:
     return STATUS_MAP.get(str(raw).strip().lower(), "ERROR")
 
 
+# KCIDB v5.3 field constraints (see kcidb_io.schema.V5_3). pullab_cloud
+# constructs these fields itself, so each value is verified before submission:
+# an invalid one would otherwise make the *whole* submission fail at the
+# ingester, with a far less obvious error than a local raise.
+#   tests[*].path -- dot-separated segments of [A-Za-z0-9_-], or empty
+#                    (kcidb_io.schema.V5_3.test_path_re)
+#   *.origin      -- [a-z0-9_]+
+_KCIDB_PATH_RE = re.compile(r"^([a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*)?$")
+_KCIDB_ORIGIN_RE = re.compile(r"^[a-z0-9_]+$")
+
+
+def validate_test_path(path: str) -> str:
+    """Verify *path* is a KCIDB v5.3-compliant test path; return it unchanged.
+
+    KCIDB v5.3 restricts ``tests[*].path`` to dot-separated segments of
+    ``[A-Za-z0-9_-]`` (the empty string is allowed -- it denotes the test
+    tree root). A path with a space, slash or other punctuation makes the
+    entire submission fail schema validation at the ingester, so it is
+    rejected here, at the producer, rather than silently rewritten.
+
+    Raises:
+        ValueError: if *path* is not KCIDB v5.3-compliant.
+    """
+    if not isinstance(path, str) or not _KCIDB_PATH_RE.match(path):
+        raise ValueError(
+            f"invalid KCIDB test path {path!r}: must be dot-separated "
+            "segments of [A-Za-z0-9_-] (KCIDB v5.3)"
+        )
+    return path
+
+
+def validate_origin(origin: str) -> str:
+    """Verify *origin* is a KCIDB v5.3-compliant origin; return it unchanged.
+
+    KCIDB v5.3 restricts every object's ``origin`` to ``[a-z0-9_]+``
+    (lowercase letters, digits and underscores).
+
+    Raises:
+        ValueError: if *origin* is not KCIDB v5.3-compliant.
+    """
+    if not isinstance(origin, str) or not _KCIDB_ORIGIN_RE.match(origin):
+        raise ValueError(
+            f"invalid KCIDB origin {origin!r}: must match [a-z0-9_]+ "
+            "(lowercase letters, digits and underscores; KCIDB v5.3)"
+        )
+    return origin
+
+
 def build_test_row(
     *,
     origin: str,
@@ -64,14 +113,24 @@ def build_test_row(
 ) -> Dict[str, Any]:
     """Build a single KCIDB tests[*] row.
 
-    Required fields per KCIDB IO schema: id, build_id, origin, path, status.
+    Required fields per the KCIDB v5.3 IO schema: id, build_id, origin.
+    `path` and `status` are optional in the schema, but always emitted here.
     Optional fields: duration, log_url, output_files, misc, comment.
+
+    `origin` and `path` are verified against the KCIDB v5.3 constraints;
+    an invalid value raises ValueError instead of being submitted, so a bad
+    test name is caught here rather than failing the whole submission at the
+    ingester.
+
+    Raises:
+        ValueError: if `origin` or `path` is not KCIDB v5.3-compliant.
     """
+    origin = validate_origin(origin)
     row: Dict[str, Any] = {
         "id": f"{origin}:{test_id}",
         "build_id": build_id,
         "origin": origin,
-        "path": path,
+        "path": validate_test_path(path),
         "status": to_kcidb_status(status),
     }
     if duration_ms is not None:

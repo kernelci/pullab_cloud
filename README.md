@@ -93,6 +93,32 @@ Actually writing a configuration file for a given setup can be done with an expl
 kernel-ci-cloud-runner aws setup configure --prefix kernel-ci-$USER- --region us-west-2 --output my-config.config
 ```
 
+### Validate setup (optional)
+
+Before launching real VMs, run a pre-flight check of AWS permissions, IAM resources, the results bucket, and KernelCI/KCIDB tokens. The command is read-only by default — pass `--fix` to create the S3 bucket if it doesn't exist yet.
+
+```bash
+kernel-ci-cloud-runner aws setup validate \
+  --bucket kernel-ci-$USER-results \
+  --role kernel-ci-$USER-vm-role \
+  --region us-west-2
+```
+
+What it checks:
+
+| Check | What it does |
+| --- | --- |
+| `aws_credentials` | `sts:GetCallerIdentity` — prints account + principal ARN |
+| `ec2_describe` | confirms `ec2:DescribeInstances` works |
+| `ec2_console_output` | probes `ec2:GetConsoleOutput` (needed to capture kernel boot logs) |
+| `ssm` | `ssm:DescribeInstanceInformation` — needed to drive the test client |
+| `iam_role` / `instance_profile` | only when `--role` is given — verifies trust policy and attached managed policies |
+| `s3_bucket` | `head_bucket`; with `--fix`, creates the bucket (region-aware) and enables Block Public Access |
+| `kernelci_api_token` | `GET <api_base_uri>/whoami` with `Bearer` from `KERNELCI_API_TOKEN` or `UNIFIED_TOKEN` |
+| `kcidb_jwt` | decodes the JWT payload (no signature verification) and reports `exp`, `iss`, `sub`; sources the token from `KCIDB_JWT`, `KCIDB_REST=https://<jwt>@host/path`, or `UNIFIED_TOKEN` |
+
+Exits non-zero if any check fails. Useful when iterating on IAM policies, rotating tokens, or onboarding a new AWS account.
+
 ### 3. Run integration test to verify setup
 
 The integration test uses only `basic-test` and `example-reboot-test` — no kernel RPMs needed. This is the fastest way to verify everything works. The test will fail if you do not provide your configuration.

@@ -19,6 +19,7 @@ from kernel_ci_cloud_labs.pull_labs_poller import (
     PullLabsPoller,
     _extract_test_results,
     _parse_kcidb_rest,
+    _test_name_to_path,
 )
 
 # Capture the real validator at import time so a specific test can restore it
@@ -187,12 +188,12 @@ class TestFileCursorStore:
 class TestEventHelpers:
     def test_matches_runtime_true(self):
         p = PullLabsPoller(_minimal_kc())
-        ev = {"node": {"data": {"data": {"runtime": "pull-labs-aws-ec2"}}}}
+        ev = {"node": {"data": {"runtime": "pull-labs-aws-ec2"}}}
         assert p._matches_runtime(ev)
 
     def test_matches_runtime_false(self):
         p = PullLabsPoller(_minimal_kc())
-        ev = {"node": {"data": {"data": {"runtime": "lava-collabora"}}}}
+        ev = {"node": {"data": {"runtime": "lava-collabora"}}}
         assert not p._matches_runtime(ev)
 
     def test_matches_runtime_missing_keys(self):
@@ -279,6 +280,39 @@ class TestExtractTestResults:
         rows, log = _extract_test_results({})
         assert rows == []
         assert log is None
+
+    def test_boot_test_names_remapped_to_boot_path(self):
+        # Boot tests must use the "boot" path so the dashboard's is_boot()
+        # classifies them as boots rather than generic tests.
+        summary = {"vms": {
+            "test_names": ["baseline", "url-kernel-boot", "ltp"],
+            "failed_by_test": {},
+        }}
+        rows, _ = _extract_test_results(summary)
+        names = sorted(r["name"] for r in rows)
+        assert names == ["boot", "boot", "ltp"]
+
+    def test_boot_remap_preserves_failure_status(self):
+        # The failed_by_test lookup must still use the original test name.
+        summary = {"vms": {
+            "test_names": ["baseline"],
+            "failed_by_test": {"baseline": ["i-123"]},
+        }}
+        rows, _ = _extract_test_results(summary)
+        assert rows == [{"name": "boot", "status": "FAIL"}]
+
+
+class TestTestNameToPath:
+    """_test_name_to_path() remaps boot test names to the 'boot' path."""
+
+    @pytest.mark.parametrize("name", ["baseline", "url-kernel-boot", "boot",
+                                      "Baseline", "  BOOT  "])
+    def test_boot_names_map_to_boot(self, name):
+        assert _test_name_to_path(name) == "boot"
+
+    @pytest.mark.parametrize("name", ["ltp", "unixbench", "kselftest", "a"])
+    def test_other_names_pass_through(self, name):
+        assert _test_name_to_path(name) == name
 
 
 # ---------------------------------------------------------------------------

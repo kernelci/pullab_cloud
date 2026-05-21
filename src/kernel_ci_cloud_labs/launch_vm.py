@@ -5,6 +5,7 @@ __copyright__ = "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserv
 # SPDX-License-Identifier: Apache-2.0
 
 
+import base64
 import json
 import shlex
 import sys
@@ -345,8 +346,45 @@ chmod +x /tmp/test-vm-client.sh
             log_error(f"✗ Failed to read result.txt: {e}")
             return False
 
+    def capture_console_output(self):
+        """Fetch EC2 serial console output (kernel boot log) and upload to S3."""
+        if not self.instance_id:
+            return
+
+        log_not("\n=== Capturing console output ===")
+        try:
+            resp = self.ec2.get_console_output(InstanceId=self.instance_id, Latest=True)
+        except Exception as e:
+            log_not(f"  Failed to fetch console output: {e}")
+            return
+
+        output_b64 = resp.get("Output", "")
+        if not output_b64:
+            log_not("  No console output available yet")
+            return
+
+        # boto3 returns the buffer base64-encoded; decode for human-readable upload.
+        try:
+            output = base64.b64decode(output_b64).decode("utf-8", errors="replace")
+        except Exception:
+            output = output_b64
+
+        s3_key = f"{self.run_prefix}/test_{self.test}/output/{self.instance_id}/console-output.log"
+        try:
+            self.s3.put_object(
+                Bucket=self.s3_bucket,
+                Key=s3_key,
+                Body=output.encode("utf-8"),
+                ContentType="text/plain; charset=utf-8",
+            )
+            log_not(f"✓ Console output uploaded ({len(output)} bytes) to s3://{self.s3_bucket}/{s3_key}")
+        except Exception as e:
+            log_not(f"  Failed to upload console output: {e}")
+
     def cleanup(self):
-        """Terminate instance."""
+        """Capture console output, then terminate instance."""
+        self.capture_console_output()
+
         if self.instance_id:
             log_not(f"\n=== Terminating instance {self.instance_id} ===")
             try:

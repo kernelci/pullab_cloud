@@ -7,6 +7,7 @@ Usage:
     kernel-ci-cloud-runner aws setup upload-rpms --bucket BUCKET --local-rpms DIR [--region REGION]
     kernel-ci-cloud-runner aws setup upload-tests --bucket BUCKET [--test-dir DIR] [--region REGION]
     kernel-ci-cloud-runner aws setup cleanup --prefix PREFIX [--region REGION] [--delete]
+    kernel-ci-cloud-runner aws setup validate [--bucket BUCKET] [--role ROLE] [--region REGION] [--fix]
 """
 
 __authors__ = ["Max Hubmann <mxhbm@amazon.de>", "Norbert Manthey <nmanthey@amazon.de>"]
@@ -167,6 +168,19 @@ def cmd_setup_upload_tests(args):
         sys.exit(1)
 
 
+def cmd_setup_validate(args):
+    """Validate AWS setup and KernelCI/KCIDB tokens; optionally create missing resources."""
+    from kernel_ci_cloud_labs.setup_validate import validate
+
+    sys.exit(validate(
+        bucket=args.bucket,
+        role_name=args.role,
+        region=args.region,
+        api_base_uri=args.api_url,
+        fix=args.fix,
+    ))
+
+
 def cmd_analyze(args):
     """Download and analyze benchmark results from a previous pipeline run."""
     try:
@@ -269,6 +283,18 @@ def main():
     test_parser.add_argument("--test-dir", default="vm-tests", help="Local test directory (default: vm-tests)")
     test_parser.add_argument("--region", default="us-west-2", help="AWS region")
     test_parser.set_defaults(func=cmd_setup_upload_tests)
+
+    # aws setup validate
+    val_parser = setup_sub.add_parser(
+        "validate",
+        help="Validate AWS setup and tokens (read-only; use --fix to create missing resources)",
+    )
+    val_parser.add_argument("--bucket", help="S3 bucket to verify (and create with --fix)")
+    val_parser.add_argument("--role", help="IAM role name used by VM instance profiles")
+    val_parser.add_argument("--region", default="us-west-2", help="AWS region (default: us-west-2)")
+    val_parser.add_argument("--api-url", help=f"KernelCI API base URI (overrides $KERNELCI_API_BASE_URI)")
+    val_parser.add_argument("--fix", action="store_true", help="Create missing resources (S3 bucket) instead of just reporting them")
+    val_parser.set_defaults(func=cmd_setup_validate)
 
     args = parser.parse_args()
 

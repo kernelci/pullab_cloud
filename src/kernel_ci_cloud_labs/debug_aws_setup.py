@@ -109,11 +109,11 @@ def check_s3_bucket(bucket_name):
         return False
 
 
-def check_ec2_permissions():
-    """Check if we can describe EC2 instances."""
+def check_ec2_permissions(region=None):
+    """Check if we can describe EC2 instances in the given region."""
     print("\n=== Checking EC2 Permissions ===")
     try:
-        ec2 = boto3.client("ec2")
+        ec2 = boto3.client("ec2", region_name=region)
         _ = ec2.describe_instances(MaxResults=5)
         print("✓ Can describe EC2 instances")
         return True
@@ -122,11 +122,11 @@ def check_ec2_permissions():
         return False
 
 
-def check_ssm_permissions():
-    """Check if we can use SSM."""
+def check_ssm_permissions(region=None):
+    """Check if we can use SSM in the given region."""
     print("\n=== Checking SSM Permissions ===")
     try:
-        ssm = boto3.client("ssm")
+        ssm = boto3.client("ssm", region_name=region)
         response = ssm.describe_instance_information(MaxResults=5)
         print("✓ Can describe SSM instances")
         count = len(response.get("InstanceInformationList", []))
@@ -181,8 +181,8 @@ def main():
     if bucket_name:
         results.append(check_s3_bucket(bucket_name))
 
-    results.append(check_ec2_permissions())
-    results.append(check_ssm_permissions())
+    results.append(check_ec2_permissions(config["region"]))
+    results.append(check_ssm_permissions(config["region"]))
 
     # Summary
     print("\n" + "=" * 60)

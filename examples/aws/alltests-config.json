@@ -84,7 +84,8 @@
                 "ec2:DescribeImages",
                 "ec2:DescribeSubnets",
                 "ec2:DescribeSecurityGroups",
-                "ec2:DescribeVpcs"
+                "ec2:DescribeVpcs",
+                "ec2:GetConsoleOutput"
               ],
               "Resource": "*"
             }

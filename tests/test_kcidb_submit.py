@@ -18,6 +18,8 @@ from kernel_ci_cloud_labs.kcidb_submit import (
     submit_revision,
     submit_tests,
     to_kcidb_status,
+    validate_origin,
+    validate_test_path,
 )
 
 
@@ -60,6 +62,37 @@ class TestStatusMapping:
             assert k == k.lower()
 
 
+class TestValidation:
+    """validate_test_path() / validate_origin() verify, never rewrite."""
+
+    @pytest.mark.parametrize(
+        "path",
+        ["", "boot", "boot.infrastructure", "ltp.syscalls", "kunit-test_03"],
+    )
+    def test_valid_paths_pass_through(self, path):
+        assert validate_test_path(path) == path
+
+    @pytest.mark.parametrize(
+        "path",
+        ["boot test", "ltp/syscalls", "fs\\ext4", "100% pass", "café",
+         "a..b", ".leading", "trailing.", "tab\there"],
+    )
+    def test_invalid_paths_raise(self, path):
+        with pytest.raises(ValueError, match="invalid KCIDB test path"):
+            validate_test_path(path)
+
+    @pytest.mark.parametrize("origin", ["o", "pullab_cloud_aws", "lab1", "x_y_2"])
+    def test_valid_origins_pass_through(self, origin):
+        assert validate_origin(origin) == origin
+
+    @pytest.mark.parametrize(
+        "origin", ["pullab-cloud", "PullLab", "lab 1", "café", ""],
+    )
+    def test_invalid_origins_raise(self, origin):
+        with pytest.raises(ValueError, match="invalid KCIDB origin"):
+            validate_origin(origin)
+
+
 class TestBuildTestRow:
     """build_test_row() shape."""
 
@@ -68,16 +101,31 @@ class TestBuildTestRow:
             origin="pullab_cloud_aws",
             build_id="maestro:b1",
             test_id="node-1.0",
-            path="ltp/syscalls",
+            path="ltp.syscalls",
             status="pass",
         )
         assert row == {
             "id": "pullab_cloud_aws:node-1.0",
             "build_id": "maestro:b1",
             "origin": "pullab_cloud_aws",
-            "path": "ltp/syscalls",
+            "path": "ltp.syscalls",
             "status": "PASS",
         }
+
+    def test_rejects_invalid_path(self):
+        # An invalid test name fails loudly here, not silently at the ingester.
+        with pytest.raises(ValueError, match="invalid KCIDB test path"):
+            build_test_row(
+                origin="o", build_id="b", test_id="t1",
+                path="boot test", status="pass",
+            )
+
+    def test_rejects_invalid_origin(self):
+        with pytest.raises(ValueError, match="invalid KCIDB origin"):
+            build_test_row(
+                origin="bad-origin", build_id="b", test_id="t1",
+                path="boot", status="pass",
+            )
 
     def test_optional_duration_converted_to_seconds(self):
         row = build_test_row(
