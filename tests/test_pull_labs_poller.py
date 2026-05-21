@@ -8,6 +8,7 @@
 import json
 import os
 import tempfile
+import urllib.error
 from unittest.mock import patch
 
 import pytest
@@ -16,11 +17,16 @@ from kernel_ci_cloud_labs import pull_labs_poller as poller_mod
 from kernel_ci_cloud_labs.pull_labs_poller import (
     DEFAULT_FROM_TIMESTAMP,
     FileCursorStore,
+    NodeOutcome,
     PullLabsPoller,
     _extract_test_results,
+    _node_result_from_rows,
     _parse_kcidb_rest,
     _test_name_to_path,
 )
+
+_GET = "kernel_ci_cloud_labs.pull_labs_poller._http_get_json"
+_PUT = "kernel_ci_cloud_labs.pull_labs_poller._http_put_json"
 
 # Capture the real validator at import time so a specific test can restore it
 # after the autouse fixture has stubbed it out.
@@ -313,6 +319,198 @@ class TestTestNameToPath:
     @pytest.mark.parametrize("name", ["ltp", "unixbench", "kselftest", "a"])
     def test_other_names_pass_through(self, name):
         assert _test_name_to_path(name) == name
+
+
+# ---------------------------------------------------------------------------
+# Node state updates — claim (state=running) and finish (state=done + result)
+# ---------------------------------------------------------------------------
+
+
+class TestNodeResultFromRows:
+    """_node_result_from_rows() maps KCIDB statuses to a node result.
+
+    It never returns "incomplete" -- that is reserved for infrastructure
+    failures and decided by the caller (see TestProcessEventNodeResult).
+    """
+
+    @pytest.mark.parametrize(
+        "statuses,expected",
+        [
+            (["PASS"], "pass"),
+            (["PASS", "PASS"], "pass"),
+            (["DONE"], "pass"),
+            (["PASS", "FAIL"], "fail"),
+            (["FAIL", "ERROR"], "fail"),
+            # ERROR/MISS in a job that ran fail the node -- they do NOT make
+            # it "incomplete" (that is infrastructure-failure only).
+            (["PASS", "ERROR"], "fail"),
+            (["MISS"], "fail"),
+            (["SKIP"], "skip"),
+        ],
+    )
+    def test_result_mapping(self, statuses, expected):
+        rows = [{"status": s} for s in statuses]
+        assert _node_result_from_rows(rows) == expected
+
+    def test_never_returns_incomplete(self):
+        for statuses in (["PASS"], ["FAIL"], ["ERROR"], ["MISS"], ["SKIP"], []):
+            rows = [{"status": s} for s in statuses]
+            assert _node_result_from_rows(rows) != "incomplete"
+
+
+class TestNodeStateUpdates:
+    """_claim_node() / _finish_node() PUT node state to kernelci-api."""
+
+    def test_claim_available_node_puts_running(self):
+        p = PullLabsPoller(_minimal_kc())
+        puts = []
+        with patch(_GET, return_value={"id": "n1", "state": "available"}), \
+             patch(_PUT, side_effect=lambda url, payload, **kw: puts.append((url, payload))):
+            assert p._claim_node({"id": "n1"}) is True
+        assert len(puts) == 1
+        assert puts[0][0].endswith("/node/n1")
+        assert puts[0][1]["state"] == "running"
+
+    def test_claim_skips_already_claimed_node(self):
+        p = PullLabsPoller(_minimal_kc())
+        with patch(_GET, return_value={"id": "n1", "state": "running"}), \
+             patch(_PUT) as put:
+            assert p._claim_node({"id": "n1"}) is False
+        put.assert_not_called()
+
+    def test_claim_skips_on_get_error(self):
+        p = PullLabsPoller(_minimal_kc())
+        with patch(_GET, side_effect=urllib.error.URLError("boom")):
+            assert p._claim_node({"id": "n1"}) is False
+
+    def test_claim_skips_on_put_error(self):
+        p = PullLabsPoller(_minimal_kc())
+        with patch(_GET, return_value={"id": "n1", "state": "available"}), \
+             patch(_PUT, side_effect=urllib.error.URLError("boom")):
+            assert p._claim_node({"id": "n1"}) is False
+
+    def test_claim_skips_node_without_id(self):
+        p = PullLabsPoller(_minimal_kc())
+        assert p._claim_node({}) is False
+
+    def test_finish_node_puts_done_and_result(self):
+        p = PullLabsPoller(_minimal_kc())
+        puts = []
+        with patch(_GET, return_value={"id": "n1", "state": "running"}), \
+             patch(_PUT, side_effect=lambda url, payload, **kw: puts.append(payload)):
+            assert p._finish_node("n1", NodeOutcome("pass")) is True
+        assert puts[0]["state"] == "done"
+        assert puts[0]["result"] == "pass"
+        # No error_code/error_msg for a clean (non-infra) result.
+        assert "error_code" not in puts[0].get("data", {})
+
+    def test_finish_node_sets_error_code_on_infra_failure(self):
+        p = PullLabsPoller(_minimal_kc())
+        puts = []
+        with patch(_GET, return_value={"id": "n1", "state": "running", "data": {}}), \
+             patch(_PUT, side_effect=lambda url, payload, **kw: puts.append(payload)):
+            ok = p._finish_node(
+                "n1", NodeOutcome("incomplete", "Infrastructure", "vm did not boot")
+            )
+        assert ok is True
+        assert puts[0]["result"] == "incomplete"
+        # error_code/error_msg go into node.data, not the top level.
+        assert puts[0]["data"]["error_code"] == "Infrastructure"
+        assert puts[0]["data"]["error_msg"] == "vm did not boot"
+
+    def test_process_event_skips_unclaimable_job(self):
+        # A job we cannot claim must not be run or submitted.
+        executor_calls = []
+        p = PullLabsPoller(
+            _minimal_kc(),
+            job_executor=lambda cfg: (executor_calls.append(cfg), ([], None))[1],
+        )
+        event = {
+            "node": {
+                "id": "n1",
+                "data": {"runtime": "pull-labs-aws-ec2"},
+                "artifacts": {"job_definition": "https://x/y.json"},
+            }
+        }
+        with patch.object(p, "_claim_node", return_value=False), \
+             patch.object(p, "_finish_node") as finish:
+            assert p.process_event(event) is True
+        assert executor_calls == []
+        finish.assert_not_called()
+
+
+def _job_event(node_id="n1"):
+    """A minimal claimable job event whose node resolves its own build_id."""
+    return {
+        "node": {
+            "id": node_id,
+            "kind": "kbuild",  # resolve_build_id returns directly, no HTTP
+            "data": {"runtime": "pull-labs-aws-ec2"},
+            "artifacts": {"job_definition": "https://x/y.json"},
+        }
+    }
+
+
+class TestProcessEventNodeResult:
+    """process_event() finishes the node; "incomplete" means infra failure."""
+
+    def _run(self, poller, event, translate=None):
+        translate = translate or {"return_value": {}}
+        captured = {}
+        with patch.object(poller, "_claim_node", return_value=True), \
+             patch.object(
+                 poller, "_finish_node",
+                 side_effect=lambda nid, outcome: captured.update(outcome=outcome),
+             ), \
+             patch(_GET, return_value={"artifacts": {}}), \
+             patch("kernel_ci_cloud_labs.pull_labs_poller.translate_job", **translate), \
+             patch("kernel_ci_cloud_labs.pull_labs_poller.submit_tests", return_value={}):
+            poller.process_event(event)
+        return captured["outcome"]
+
+    def test_passing_run_finishes_pass(self):
+        p = PullLabsPoller(
+            _minimal_kc(),
+            job_executor=lambda cfg: ([{"name": "ltp", "status": "PASS"}], None),
+        )
+        outcome = self._run(p, _job_event())
+        assert outcome.result == "pass"
+        assert outcome.error_code is None
+
+    def test_failing_run_finishes_fail(self):
+        p = PullLabsPoller(
+            _minimal_kc(),
+            job_executor=lambda cfg: ([{"name": "ltp", "status": "FAIL"}], None),
+        )
+        outcome = self._run(p, _job_event())
+        assert outcome.result == "fail"
+        assert outcome.error_code is None
+
+    def test_executor_crash_finishes_incomplete_infrastructure(self):
+        def _boom(cfg):
+            raise RuntimeError("vm did not boot")
+
+        p = PullLabsPoller(_minimal_kc(), job_executor=_boom)
+        outcome = self._run(p, _job_event())
+        assert outcome.result == "incomplete"
+        assert outcome.error_code == "Infrastructure"
+        assert "vm did not boot" in outcome.error_msg
+
+    def test_no_results_finishes_incomplete_infrastructure(self):
+        p = PullLabsPoller(_minimal_kc(), job_executor=lambda cfg: ([], None))
+        outcome = self._run(p, _job_event())
+        assert outcome.result == "incomplete"
+        assert outcome.error_code == "Infrastructure"
+
+    def test_translate_failure_finishes_invalid_job_params(self):
+        p = PullLabsPoller(_minimal_kc(), job_executor=lambda cfg: ([], None))
+        outcome = self._run(
+            p, _job_event(),
+            translate={"side_effect": ValueError("missing artifacts.kernel")},
+        )
+        assert outcome.result == "incomplete"
+        assert outcome.error_code == "invalid_job_params"
+        assert "missing artifacts.kernel" in outcome.error_msg
 
 
 # ---------------------------------------------------------------------------
