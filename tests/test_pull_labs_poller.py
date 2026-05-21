@@ -6,6 +6,7 @@
 """Unit tests for pull_labs_poller (no network, no AWS)."""
 
 import json
+import logging
 import os
 import tempfile
 import urllib.error
@@ -28,9 +29,10 @@ from kernel_ci_cloud_labs.pull_labs_poller import (
 _GET = "kernel_ci_cloud_labs.pull_labs_poller._http_get_json"
 _PUT = "kernel_ci_cloud_labs.pull_labs_poller._http_put_json"
 
-# Capture the real validator at import time so a specific test can restore it
-# after the autouse fixture has stubbed it out.
+# Capture the real validators at import time so a specific test can call them
+# after the autouse fixtures have stubbed them out.
 _REAL_VALIDATE_DEFAULT_EXECUTOR_DEPS = poller_mod._validate_default_executor_deps
+_REAL_VALIDATE_API_TOKEN = poller_mod._validate_api_token
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +60,16 @@ def _skip_default_executor_deps_check(monkeypatch):
     for the validator itself temporarily restore the real function.
     """
     monkeypatch.setattr(poller_mod, "_validate_default_executor_deps", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _skip_api_token_check(monkeypatch):
+    """Bypass the startup /whoami token preflight (no network in unit tests).
+
+    Dedicated tests call the real _validate_api_token via the captured
+    reference with _http_get_json patched.
+    """
+    monkeypatch.setattr(poller_mod, "_validate_api_token", lambda *a, **k: None)
 
 
 def _minimal_kc(**overrides):
@@ -554,3 +566,55 @@ class TestDefaultExecutorDepsValidation:
         # Custom executor — validator must be skipped, no SystemExit.
         PullLabsPoller(_minimal_kc(), job_executor=lambda cfg: ([], None))
         assert called["validator"] is False
+
+
+# ---------------------------------------------------------------------------
+# Startup /whoami token preflight
+# ---------------------------------------------------------------------------
+
+
+class TestValidateApiToken:
+    """_validate_api_token() -- never fatal, logs token validity and groups."""
+
+    URI = "https://api.example/latest"
+    RUNTIME = "pull-labs-aws-ec2"
+
+    def test_no_token_warns(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            _REAL_VALIDATE_API_TOKEN(self.URI, None, self.RUNTIME)
+        assert "No kernelci-api token" in caplog.text
+
+    def test_401_logs_error(self, caplog):
+        err = urllib.error.HTTPError(self.URI, 401, "Unauthorized", {}, None)
+        with patch(_GET, side_effect=err), caplog.at_level(logging.ERROR):
+            _REAL_VALIDATE_API_TOKEN(self.URI, "bad-token", self.RUNTIME)
+        assert "rejected" in caplog.text
+
+    def test_network_error_is_not_fatal(self):
+        # A transient API error must not raise -- it cannot block startup.
+        with patch(_GET, side_effect=urllib.error.URLError("boom")):
+            _REAL_VALIDATE_API_TOKEN(self.URI, "t", self.RUNTIME)
+
+    def test_valid_token_with_editor_group(self, caplog):
+        whoami = {
+            "username": "pullbot",
+            "groups": [{"name": "runtime:pull-labs-aws-ec2:node-editor"}],
+        }
+        with patch(_GET, return_value=whoami), caplog.at_level(logging.INFO):
+            _REAL_VALIDATE_API_TOKEN(self.URI, "t", self.RUNTIME)
+        assert "token OK" in caplog.text
+        assert "cannot edit" not in caplog.text
+
+    def test_superuser_token_ok(self, caplog):
+        whoami = {"username": "root", "is_superuser": True, "groups": []}
+        with patch(_GET, return_value=whoami), caplog.at_level(logging.INFO):
+            _REAL_VALIDATE_API_TOKEN(self.URI, "t", self.RUNTIME)
+        assert "cannot edit" not in caplog.text
+
+    def test_valid_token_without_editor_group_warns(self, caplog):
+        whoami = {"username": "pullbot", "groups": [{"name": "some-other-group"}]}
+        with patch(_GET, return_value=whoami), caplog.at_level(logging.WARNING):
+            _REAL_VALIDATE_API_TOKEN(self.URI, "t", self.RUNTIME)
+        assert "cannot edit job nodes" in caplog.text
+        # The required group is named in the hint.
+        assert "runtime:pull-labs-aws-ec2:node-editor" in caplog.text

@@ -141,6 +141,80 @@ def _http_put_json(
         return json.loads(resp_body) if resp_body else None
 
 
+def _validate_api_token(
+    api_base_uri: str, api_token: Optional[str], runtime_name: str
+) -> None:
+    """Startup preflight: confirm api_token authenticates and can edit nodes.
+
+    Calls GET /whoami once and logs the outcome. Never fatal -- a transient
+    API error must not stop the poller from starting, and node updates have
+    their own per-call error handling. It surfaces, at startup, the two
+    failure modes that otherwise only show up as a 401 on every job:
+      * the token does not authenticate at all (no token / invalid / expired);
+      * the token authenticates but the user cannot edit job nodes for this
+        runtime (kernelci-api _user_can_edit_node).
+    """
+    if not api_token:
+        logger.warning(
+            "No kernelci-api token set (KERNELCI_API_TOKEN / UNIFIED_TOKEN / "
+            "config kernelci.api_token) -- node claim/finish updates will "
+            "fail with HTTP 401"
+        )
+        return
+
+    url = f"{api_base_uri.rstrip('/')}/whoami"
+    try:
+        whoami = _http_get_json(url, token=api_token) or {}
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            logger.error(
+                "kernelci-api token rejected by %s (HTTP %s) -- the token is "
+                "invalid, expired, or not a kernelci-api token; node updates "
+                "will fail",
+                url, e.code,
+            )
+        else:
+            logger.warning(
+                "Could not validate kernelci-api token via %s: HTTP %s",
+                url, e.code,
+            )
+        return
+    except (urllib.error.URLError, json.JSONDecodeError) as e:
+        logger.warning(
+            "Could not reach %s to validate the kernelci-api token (%s) -- "
+            "continuing; node updates will be retried per job",
+            url, e,
+        )
+        return
+
+    username = whoami.get("username") or whoami.get("email") or "<unknown>"
+    is_superuser = bool(whoami.get("is_superuser"))
+    groups = {
+        g.get("name")
+        for g in whoami.get("groups", [])
+        if isinstance(g, dict) and g.get("name")
+    }
+    # Groups that let a user edit a job node it does not own
+    # (kernelci-api _user_can_edit_node).
+    editor_groups = {
+        "node:edit:any",
+        f"runtime:{runtime_name}:node-editor",
+        f"runtime:{runtime_name}:node-admin",
+    }
+    logger.info(
+        "kernelci-api token OK: user=%s superuser=%s groups=%s",
+        username, is_superuser, sorted(groups) or [],
+    )
+    if not is_superuser and not (groups & editor_groups):
+        logger.warning(
+            "kernelci-api user %s cannot edit job nodes for runtime '%s': "
+            "not a superuser and in none of %s -- node claim/finish updates "
+            "will fail with HTTP 401 unless the user owns the nodes. Add the "
+            "user to group 'runtime:%s:node-editor'.",
+            username, runtime_name, sorted(editor_groups), runtime_name,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Cursor persistence — generic filesystem backend by default.
 # A deployment can swap in a custom CursorStore (e.g. backed by S3) by
@@ -391,6 +465,10 @@ class PullLabsPoller:
 
         if job_executor is None:
             _validate_default_executor_deps()
+
+        # Startup preflight: surface a bad/under-privileged kernelci-api token
+        # now, rather than as a 401 on every job's claim/finish update.
+        _validate_api_token(self.api_base_uri, self.api_token, self.runtime_name)
 
     # -- Credential resolution -------------------------------------------
 
