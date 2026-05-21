@@ -87,11 +87,11 @@ def _create_s3_bucket(s3, bucket_name: str, region: str) -> bool:
         return False
 
 
-def check_console_output_permission() -> bool:
+def check_console_output_permission(region: Optional[str] = None) -> bool:
     """Probe ec2:GetConsoleOutput. Uses a non-existent instance id so the only
     permission we test is the IAM action itself."""
     print("\n=== Checking ec2:GetConsoleOutput permission ===")
-    ec2 = boto3.client("ec2")
+    ec2 = boto3.client("ec2", region_name=region)
     try:
         ec2.get_console_output(InstanceId="i-0000000000000000f")
         print("✓ Call accepted (unexpected; permission OK)")
@@ -237,9 +237,9 @@ def validate(bucket: Optional[str] = None,
     results = {}
 
     results["aws_credentials"] = check_aws_credentials()
-    results["ec2_describe"] = check_ec2_permissions()
-    results["ec2_console_output"] = check_console_output_permission()
-    results["ssm"] = check_ssm_permissions()
+    results["ec2_describe"] = check_ec2_permissions(region)
+    results["ec2_console_output"] = check_console_output_permission(region)
+    results["ssm"] = check_ssm_permissions(region)
 
     if role_name:
         results["iam_role"] = check_iam_role(role_name)
