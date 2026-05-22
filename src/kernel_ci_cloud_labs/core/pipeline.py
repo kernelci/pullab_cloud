@@ -414,9 +414,10 @@ def run_pipeline(
             vms_dir = Path(run_dir) / "vms"
             vms_dir.mkdir(exist_ok=True)
 
-            # Wait for VM logs to appear
-            max_retries = 6
-            retry_delay = 5
+            # Wait for VM logs to appear (CloudWatch agent ships in batches
+            # after the VM shuts down — give it up to 5 min to surface).
+            max_retries = 10
+            retry_delay = 30
 
             for attempt in range(max_retries):
                 # Get log streams from run-specific log group
