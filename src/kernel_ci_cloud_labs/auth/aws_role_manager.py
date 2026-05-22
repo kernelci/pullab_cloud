@@ -22,6 +22,41 @@ class AWSRoleManager(BaseResourceManager):
         except self.client.exceptions.NoSuchEntityException:
             return False
 
+    @staticmethod
+    def _is_ec2_role(resource_config: Dict[str, Any]) -> bool:
+        """Return True if the role's trust policy allows EC2 to assume it."""
+        trust_policy = resource_config.get("trust_policy", {})
+        principals = trust_policy.get("Statement", [{}])[0].get("Principal", {})
+        return isinstance(principals, dict) and "ec2.amazonaws.com" in str(principals)
+
+    def _ensure_instance_profile(self, name: str) -> None:
+        """Ensure the EC2 instance profile exists AND has the role bound.
+
+        The two operations are independently idempotent. A previous partial
+        setup (or manual cleanup) can leave the profile in place with no
+        role attached — invisible to RunInstances, but the VM boots without
+        credentials so the SSM agent can never register, and downstream
+        SSM-based test execution fails with "SSM agent not ready".
+        """
+        try:
+            self.client.create_instance_profile(InstanceProfileName=name)
+        except self.client.exceptions.EntityAlreadyExistsException:
+            pass
+        try:
+            profile = self.client.get_instance_profile(InstanceProfileName=name)
+            bound = {r["RoleName"] for r in profile["InstanceProfile"]["Roles"]}
+        except self.client.exceptions.NoSuchEntityException:
+            bound = set()
+        if name not in bound:
+            try:
+                self.client.add_role_to_instance_profile(
+                    InstanceProfileName=name, RoleName=name,
+                )
+            except self.client.exceptions.LimitExceededException:
+                # A different role is already bound to this profile;
+                # leave it alone rather than silently rebinding.
+                pass
+
     def delete_role(self, resource_name: str) -> None:
         """Delete IAM role and detach policies"""
         try:
@@ -69,16 +104,29 @@ class AWSRoleManager(BaseResourceManager):
             )
 
         # Create instance profile for EC2 roles
-        trust_policy = resource_config.get("trust_policy", {})
-        principals = trust_policy.get("Statement", [{}])[0].get("Principal", {})
-        if isinstance(principals, dict) and "ec2.amazonaws.com" in str(principals):
-            try:
-                self.client.create_instance_profile(InstanceProfileName=resource_name)
-                self.client.add_role_to_instance_profile(InstanceProfileName=resource_name, RoleName=resource_name)
-            except self.client.exceptions.EntityAlreadyExistsException:
-                pass
+        if self._is_ec2_role(resource_config):
+            self._ensure_instance_profile(resource_name)
 
         return response["Role"]["Arn"]
+
+    def ensure_exists(
+        self,
+        resource_name: str,
+        resource_config: Dict[str, Any] = None,
+        force_recreate: bool = False,
+    ):
+        """Ensure role exists; also (re-)verify EC2 instance-profile binding.
+
+        The base implementation short-circuits when the role already exists,
+        which means a drifted instance profile (profile present but no role
+        attached) is never repaired on re-run. We always run the binding
+        check after the base call so re-runs heal that state.
+        """
+        result = super().ensure_exists(resource_name, resource_config, force_recreate)
+        config = resource_config if resource_config is not None else self.config.get(resource_name, {})
+        if self._is_ec2_role(config):
+            self._ensure_instance_profile(resource_name)
+        return result
 
     def get_identifier(self, resource_name: str) -> str:
         """Get role ARN"""
