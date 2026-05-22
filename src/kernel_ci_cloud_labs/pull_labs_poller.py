@@ -391,19 +391,77 @@ def _test_name_to_path(name: str) -> str:
     return "boot" if name.strip().lower() in _BOOT_TEST_NAMES else name
 
 
-def _extract_test_results(summary: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-    """Pull per-test status out of the summary dict returned by run_pipeline.
+def _load_artifact_log_urls(run_directory: Optional[str]) -> Dict[Tuple[str, str], str]:
+    """Read ``artifacts.json`` and index its ``log_url``s by (test, instance_id).
 
-    The summary shape is owned by core/pipeline.create_summary(); this
-    helper isolates the dependency on its exact field names.
+    Returns an empty dict on any error (missing file, malformed JSON, schema
+    mismatch). Missing log URLs in KCIDB are a quality issue; failing to
+    submit the run is a worse outcome.
     """
-    rows: List[Dict[str, Any]] = []
+    if not run_directory:
+        return {}
+    path = os.path.join(run_directory, "artifacts.json")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+    except (OSError, ValueError) as e:
+        logger.warning("Could not read %s: %s", path, e)
+        return {}
+
+    index: Dict[Tuple[str, str], str] = {}
+    for entry in manifest.get("artifacts", []) or []:
+        test = entry.get("test")
+        instance_id = entry.get("instance_id")
+        log_url = entry.get("log_url")
+        if test and instance_id and log_url:
+            index[(test, instance_id)] = log_url
+    return index
+
+
+def _extract_test_results(summary: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Pull per-instance test status out of the summary dict.
+
+    Emits one row per VM instance — matching one ``tests[*]`` row in KCIDB —
+    and attaches its boot-log URL by joining with
+    ``<run_directory>/artifacts.json`` on ``(test, instance_id)``. A row
+    without a manifest entry (boot console never made it to S3) carries
+    ``log_url=None`` and is still submitted, so KCIDB sees the result.
+
+    Falls back to the legacy per-test aggregation (one row per test name)
+    when ``summary["vms"]["instances"]`` is absent — keeps older
+    in-flight summary files and unit tests using the old shape working.
+
+    The second tuple element (legacy ``log_url`` slot) is always ``None``;
+    log URLs are now per-row and live in ``row["log_url"]``.
+    """
     vms = summary.get("vms", {}) or {}
-    test_names = vms.get("test_names") or []
-    failed_by_test = vms.get("failed_by_test") or {}
-    for name in test_names:
-        status = "FAIL" if failed_by_test.get(name) else "PASS"
-        rows.append({"name": _test_name_to_path(name), "status": status})
+    instances = vms.get("instances")
+
+    # Legacy path: no per-instance breakdown -> one row per test name, no URLs.
+    if not instances:
+        rows: List[Dict[str, Any]] = []
+        test_names = vms.get("test_names") or []
+        failed_by_test = vms.get("failed_by_test") or {}
+        for name in test_names:
+            status = "FAIL" if failed_by_test.get(name) else "PASS"
+            rows.append({"name": _test_name_to_path(name), "status": status})
+        return rows, None
+
+    url_by_pair = _load_artifact_log_urls(summary.get("run_directory"))
+    rows = []
+    for inst in instances:
+        test = inst.get("test", "unknown")
+        instance_id = inst.get("instance_id", "")
+        rows.append(
+            {
+                "name": _test_name_to_path(test),
+                "status": inst.get("status", "ERROR"),
+                "instance_id": instance_id,
+                "log_url": url_by_pair.get((test, instance_id)),
+            }
+        )
     return rows, None
 
 
@@ -833,19 +891,34 @@ class PullLabsPoller:
             per_test = [{"name": "boot.infrastructure", "status": "ERROR"}]
             log_url = None
 
-        test_rows = [
-            build_test_row(
-                origin=self.kcidb_origin,
-                build_id=build_id,
-                test_id=f"{node_id}.{idx}",
-                path=t.get("name", f"test_{idx}"),
-                status=to_kcidb_status(t.get("status", "error")),
-                duration_ms=t.get("duration_ms"),
-                log_url=log_url,
-                misc={"kernelci_node_id": node_id},
+        # Per-row `log_url` (from artifacts.json) supersedes the legacy
+        # job-level `log_url` returned by the executor. The legacy value is
+        # only consulted when the row itself does not carry one — true for
+        # the fallback path in _extract_test_results and for executor crashes.
+        # When a row carries an instance_id, fold it into the test_id so the
+        # KCIDB row is stable across retries (instead of positional `.{idx}`).
+        test_rows = []
+        for idx, t in enumerate(per_test or []):
+            instance_suffix = t.get("instance_id") or str(idx)
+            test_rows.append(
+                build_test_row(
+                    origin=self.kcidb_origin,
+                    build_id=build_id,
+                    test_id=f"{node_id}.{instance_suffix}",
+                    path=t.get("name", f"test_{idx}"),
+                    status=to_kcidb_status(t.get("status", "error")),
+                    duration_ms=t.get("duration_ms"),
+                    log_url=t.get("log_url") or log_url,
+                    misc={
+                        "kernelci_node_id": node_id,
+                        **(
+                            {"instance_id": t["instance_id"]}
+                            if t.get("instance_id")
+                            else {}
+                        ),
+                    },
+                )
             )
-            for idx, t in enumerate(per_test or [])
-        ]
         if not test_rows:
             # No per-test results came back -> the outcome is unknown, itself
             # an infrastructure failure (-> node result incomplete).

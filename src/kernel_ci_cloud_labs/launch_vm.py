@@ -15,6 +15,8 @@ import uuid
 import boto3
 from botocore.config import Config
 
+from kernel_ci_cloud_labs.core.log_scrub import scrub_text
+
 
 def log_error(msg):
     """Print error to stderr (shows in container log)."""
@@ -72,6 +74,12 @@ class VMLauncher:
             self.test_id = f"{self.test}-{str(uuid.uuid4())[:8]}"
 
         self.instance_id = None
+        # Console-output capture is idempotent: once we've uploaded a non-empty
+        # buffer we don't re-upload. The buffer in EC2 only grows, so any
+        # second call would either be identical or strictly larger — we
+        # accept "strictly larger" by allowing capture again until we get a
+        # non-empty response.
+        self._console_captured = False
 
         # Configure boto3 with exponential backoff retry strategy
         retry_config = Config(
@@ -302,6 +310,10 @@ chmod +x /tmp/test-vm-client.sh
                     elif status == "Cancelled":
                         log_error("✗ SSM command was cancelled")
 
+                    # Grab console buffer before the VM is terminated by
+                    # cleanup() — the tail (panic / OOM / kernel trace) is
+                    # the most useful artifact when SSM did not return Success.
+                    self.capture_console_output(reason="ssm-failure")
                     return False
 
             except self.ssm.exceptions.InvocationDoesNotExist:
@@ -319,6 +331,10 @@ chmod +x /tmp/test-vm-client.sh
             log_not("  Cancelled SSM command")
         except Exception:
             pass
+        # Same rationale as the SSM-failure branch above: capture the console
+        # buffer now, while the VM is still alive, so a panic on the watchdog
+        # path is not lost when cleanup() races the EC2 GetConsoleOutput lag.
+        self.capture_console_output(reason="ssm-failure")
         return False
 
     def check_test_result(self):
@@ -346,12 +362,29 @@ chmod +x /tmp/test-vm-client.sh
             log_error(f"✗ Failed to read result.txt: {e}")
             return False
 
-    def capture_console_output(self):
-        """Fetch EC2 serial console output (kernel boot log) and upload to S3."""
+    def capture_console_output(self, reason="cleanup"):
+        """Fetch EC2 serial console output (kernel boot log) and upload to S3.
+
+        Safe to call multiple times: subsequent calls will overwrite the S3
+        object with a (typically larger) snapshot. Once we have successfully
+        captured a non-empty buffer, later calls are skipped — except when
+        forced via a different `reason` from the SSM-failure path, where the
+        most recent state of the buffer is more interesting than an earlier
+        capture taken before the failure was visible.
+
+        Args:
+            reason: Free-text label for the call site (logged for diagnostics).
+                Currently used values: "cleanup", "ssm-failure".
+        """
         if not self.instance_id:
             return
+        if self._console_captured and reason == "cleanup":
+            # cleanup() always runs in the finally block, even if we already
+            # grabbed the buffer on SSM failure. Skip the redundant fetch.
+            log_not("  Console output already captured this run, skipping")
+            return
 
-        log_not("\n=== Capturing console output ===")
+        log_not(f"\n=== Capturing console output ({reason}) ===")
         try:
             resp = self.ec2.get_console_output(InstanceId=self.instance_id, Latest=True)
         except Exception as e:
@@ -369,6 +402,15 @@ chmod +x /tmp/test-vm-client.sh
         except Exception:
             output = output_b64
 
+        # Scrub before upload. The bucket is public-read (KCIDB dashboard users
+        # follow the URL we publish), so any secret that lands here would be
+        # world-visible. Counters are logged; original strings are not.
+        scrubbed, redaction_counts = scrub_text(output)
+        if redaction_counts:
+            summary = ", ".join(f"{k}={v}" for k, v in sorted(redaction_counts.items()))
+            log_not(f"  Console scrub redacted: {summary}")
+        output = scrubbed
+
         s3_key = f"{self.run_prefix}/test_{self.test}/output/{self.instance_id}/console-output.log"
         try:
             self.s3.put_object(
@@ -376,14 +418,21 @@ chmod +x /tmp/test-vm-client.sh
                 Key=s3_key,
                 Body=output.encode("utf-8"),
                 ContentType="text/plain; charset=utf-8",
+                Metadata={
+                    "capture-reason": reason,
+                    # Records that the buffer passed through the scrubber, so an
+                    # operator inspecting the object knows it's not raw.
+                    "scrubbed": "v1",
+                },
             )
             log_not(f"✓ Console output uploaded ({len(output)} bytes) to s3://{self.s3_bucket}/{s3_key}")
+            self._console_captured = True
         except Exception as e:
             log_not(f"  Failed to upload console output: {e}")
 
     def cleanup(self):
         """Capture console output, then terminate instance."""
-        self.capture_console_output()
+        self.capture_console_output(reason="cleanup")
 
         if self.instance_id:
             log_not(f"\n=== Terminating instance {self.instance_id} ===")

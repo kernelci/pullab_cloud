@@ -320,6 +320,146 @@ class TestExtractTestResults:
         assert rows == [{"name": "boot", "status": "FAIL"}]
 
 
+class TestExtractTestResultsPerInstance:
+    """When summary["vms"]["instances"] is present the extractor must emit
+    one row per VM and join boot-log URLs from artifacts.json."""
+
+    @staticmethod
+    def _write_manifest(run_dir, artifacts):
+        path = os.path.join(run_dir, "artifacts.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"artifacts": artifacts}, f)
+        return path
+
+    def test_one_row_per_instance_with_log_url(self, tmp_path):
+        # Two VMs for the same test, both with a manifest entry.
+        self._write_manifest(
+            tmp_path,
+            [
+                {
+                    "test": "baseline",
+                    "instance_id": "i-aaa",
+                    "log_url": "https://b.s3.eu-west-1.amazonaws.com/a.log",
+                    "status": "ready",
+                },
+                {
+                    "test": "baseline",
+                    "instance_id": "i-bbb",
+                    "log_url": "https://b.s3.eu-west-1.amazonaws.com/b.log",
+                    "status": "ready",
+                },
+            ],
+        )
+        summary = {
+            "run_directory": str(tmp_path),
+            "vms": {
+                "instances": [
+                    {"test": "baseline", "instance_id": "i-aaa", "status": "PASS"},
+                    {"test": "baseline", "instance_id": "i-bbb", "status": "FAIL"},
+                ],
+            },
+        }
+        rows, log = _extract_test_results(summary)
+        assert log is None
+        # boot remap applied; instance_id and log_url preserved per row.
+        assert rows == [
+            {
+                "name": "boot",
+                "status": "PASS",
+                "instance_id": "i-aaa",
+                "log_url": "https://b.s3.eu-west-1.amazonaws.com/a.log",
+            },
+            {
+                "name": "boot",
+                "status": "FAIL",
+                "instance_id": "i-bbb",
+                "log_url": "https://b.s3.eu-west-1.amazonaws.com/b.log",
+            },
+        ]
+
+    def test_missing_manifest_entry_leaves_log_url_none(self, tmp_path):
+        # i-bbb's console upload failed -> no manifest entry; the row is
+        # still emitted with status from the summary, log_url=None.
+        self._write_manifest(
+            tmp_path,
+            [
+                {
+                    "test": "baseline",
+                    "instance_id": "i-aaa",
+                    "log_url": "https://b.s3.eu-west-1.amazonaws.com/a.log",
+                },
+            ],
+        )
+        summary = {
+            "run_directory": str(tmp_path),
+            "vms": {
+                "instances": [
+                    {"test": "baseline", "instance_id": "i-aaa", "status": "PASS"},
+                    {"test": "baseline", "instance_id": "i-bbb", "status": "FAIL"},
+                ],
+            },
+        }
+        rows, _ = _extract_test_results(summary)
+        urls = {r["instance_id"]: r["log_url"] for r in rows}
+        assert urls == {"i-aaa": "https://b.s3.eu-west-1.amazonaws.com/a.log",
+                        "i-bbb": None}
+
+    def test_no_artifacts_json_still_emits_per_instance_rows(self, tmp_path):
+        # run_directory exists but artifacts.json never got written
+        # (e.g. collect_run_artifacts failed). Each row has log_url=None.
+        summary = {
+            "run_directory": str(tmp_path),
+            "vms": {
+                "instances": [
+                    {"test": "ltp", "instance_id": "i-aaa", "status": "PASS"},
+                ],
+            },
+        }
+        rows, _ = _extract_test_results(summary)
+        assert rows == [
+            {"name": "ltp", "status": "PASS",
+             "instance_id": "i-aaa", "log_url": None},
+        ]
+
+    def test_corrupt_artifacts_json_is_non_fatal(self, tmp_path, caplog):
+        (tmp_path / "artifacts.json").write_text("{not valid json")
+        summary = {
+            "run_directory": str(tmp_path),
+            "vms": {
+                "instances": [
+                    {"test": "ltp", "instance_id": "i-x", "status": "PASS"},
+                ],
+            },
+        }
+        with caplog.at_level(logging.WARNING):
+            rows, _ = _extract_test_results(summary)
+        assert rows[0]["log_url"] is None
+        assert any("artifacts.json" in r.message for r in caplog.records)
+
+    def test_artifacts_join_requires_both_test_and_instance(self, tmp_path):
+        # Manifest entries lacking test/instance_id/log_url are skipped
+        # rather than producing partial matches.
+        self._write_manifest(
+            tmp_path,
+            [
+                {"test": "ltp", "instance_id": "i-a"},  # no log_url
+                {"test": "ltp", "log_url": "https://x"},  # no instance_id
+                {"instance_id": "i-b", "log_url": "https://y"},  # no test
+            ],
+        )
+        summary = {
+            "run_directory": str(tmp_path),
+            "vms": {
+                "instances": [
+                    {"test": "ltp", "instance_id": "i-a", "status": "PASS"},
+                    {"test": "ltp", "instance_id": "i-b", "status": "PASS"},
+                ],
+            },
+        }
+        rows, _ = _extract_test_results(summary)
+        assert all(r["log_url"] is None for r in rows)
+
+
 class TestTestNameToPath:
     """_test_name_to_path() remaps boot test names to the 'boot' path."""
 
@@ -540,6 +680,47 @@ class TestProcessEventNodeResult:
         assert outcome.result == "incomplete"
         assert outcome.error_code == "invalid_job_params"
         assert "missing artifacts.kernel" in outcome.error_msg
+
+    def test_per_instance_rows_carry_log_url_and_stable_test_id(self):
+        """When executor returns per-instance rows with log_url, the submitted
+        KCIDB rows must each carry that URL and a test_id derived from the
+        instance_id (not the positional index)."""
+        per_test = [
+            {"name": "boot", "status": "PASS", "instance_id": "i-aaaa1111",
+             "log_url": "https://b.s3.eu-west-1.amazonaws.com/a.log"},
+            {"name": "boot", "status": "FAIL", "instance_id": "i-bbbb2222",
+             "log_url": "https://b.s3.eu-west-1.amazonaws.com/b.log"},
+        ]
+        p = PullLabsPoller(
+            _minimal_kc(),
+            job_executor=lambda cfg: (per_test, None),
+        )
+        seen = {}
+        with patch.object(p, "_claim_node", return_value=True), \
+             patch.object(p, "_finish_node"), \
+             patch(_GET, return_value={"artifacts": {}}), \
+             patch("kernel_ci_cloud_labs.pull_labs_poller.translate_job",
+                   return_value={}), \
+             patch(
+                "kernel_ci_cloud_labs.pull_labs_poller.submit_tests",
+                side_effect=lambda url, jwt, origin, build_id, rows: seen.update(rows=rows),
+             ):
+            p.process_event(_job_event(node_id="ndX"))
+
+        rows = seen["rows"]
+        assert len(rows) == 2
+        by_id = {r["id"]: r for r in rows}
+        # test_id derived from instance_id => stable across retries.
+        assert set(by_id) == {"pullab_cloud_aws:ndX.i-aaaa1111", "pullab_cloud_aws:ndX.i-bbbb2222"}
+        # Per-row log_url survives the build_test_row pass-through.
+        assert by_id["pullab_cloud_aws:ndX.i-aaaa1111"]["log_url"] == \
+            "https://b.s3.eu-west-1.amazonaws.com/a.log"
+        assert by_id["pullab_cloud_aws:ndX.i-bbbb2222"]["log_url"] == \
+            "https://b.s3.eu-west-1.amazonaws.com/b.log"
+        # instance_id surfaces in misc for traceability.
+        assert by_id["pullab_cloud_aws:ndX.i-aaaa1111"]["misc"]["instance_id"] == "i-aaaa1111"
+        # Aggregated node outcome from per-instance statuses.
+        # (one fail among two -> fail; verified indirectly via existing tests).
 
 
 # ---------------------------------------------------------------------------

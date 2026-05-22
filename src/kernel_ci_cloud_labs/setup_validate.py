@@ -70,14 +70,18 @@ def _create_s3_bucket(s3, bucket_name: str, region: str) -> bool:
                 Bucket=bucket_name,
                 CreateBucketConfiguration={"LocationConstraint": region},
             )
-        # Default-on: block public access; modern best practice.
+        # Block public ACLs (modern best practice) but allow bucket
+        # *policies* to grant access — kernel boot logs published to KCIDB
+        # are made public-readable via a narrow bucket-policy statement
+        # added by check_s3_logs_public_policy(). Without these two flags
+        # set to False, that policy would be rejected by AWS.
         s3.put_public_access_block(
             Bucket=bucket_name,
             PublicAccessBlockConfiguration={
                 "BlockPublicAcls": True,
                 "IgnorePublicAcls": True,
-                "BlockPublicPolicy": True,
-                "RestrictPublicBuckets": True,
+                "BlockPublicPolicy": False,
+                "RestrictPublicBuckets": False,
             },
         )
         print(f"✓ Created S3 bucket: {bucket_name}")
@@ -85,6 +89,172 @@ def _create_s3_bucket(s3, bucket_name: str, region: str) -> bool:
     except ClientError as e:
         print(f"✗ Failed to create bucket: {e}")
         return False
+
+
+# Resource pattern allowed by the public-read bucket policy. We expose
+# *only* kernel boot console logs (one file per VM instance per test),
+# so the rest of the bucket — test payloads, results.txt, stats.json,
+# benchmark CSVs — stays private. The pattern matches the layout written
+# by `launch_vm.capture_console_output`:
+#   <run_prefix>/test_<name>/output/<instance_id>/console-output.log
+_PUBLIC_LOGS_KEY_PATTERN = "*/test_*/output/*/console-output.log"
+_PUBLIC_LOGS_SID = "PublicReadKernelBootLogs"
+
+
+def _expected_bucket_policy(bucket_name: str) -> dict:
+    """Bucket policy that grants anonymous GET on the boot-log prefix only."""
+    return {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": _PUBLIC_LOGS_SID,
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": "s3:GetObject",
+                "Resource": f"arn:aws:s3:::{bucket_name}/{_PUBLIC_LOGS_KEY_PATTERN}",
+            }
+        ],
+    }
+
+
+def check_s3_logs_public_policy(bucket_name: str, region: str, fix: bool = False) -> bool:
+    """Verify the bucket allows anonymous GET on kernel boot logs.
+
+    Two preconditions:
+      1. The bucket's PublicAccessBlock must permit bucket policies
+         (BlockPublicPolicy=False, RestrictPublicBuckets=False). ACL-based
+         public access stays blocked — we publish via bucket policy only.
+      2. A statement with Sid='PublicReadKernelBootLogs' must grant
+         s3:GetObject on the console-output.log pattern to Principal:*.
+
+    With ``fix=True``, both preconditions are repaired:
+      - PublicAccessBlock is rewritten with ACLs still blocked but bucket
+        policies permitted;
+      - the bucket policy is merged with the expected statement (existing
+        statements are preserved; an existing statement with the same Sid
+        is replaced).
+    """
+    print(f"\n=== Checking S3 logs public-read policy: {bucket_name} ===")
+    s3 = boto3.client("s3", region_name=region)
+
+    # --- PublicAccessBlock ----------------------------------------------------
+    pab_ok = _check_public_access_block(s3, bucket_name, fix=fix)
+
+    # --- Bucket policy --------------------------------------------------------
+    policy_ok = _check_bucket_policy_statement(s3, bucket_name, fix=fix)
+
+    return pab_ok and policy_ok
+
+
+def _check_public_access_block(s3, bucket_name: str, fix: bool) -> bool:
+    """Ensure BlockPublicPolicy / RestrictPublicBuckets are False."""
+    desired = {
+        "BlockPublicAcls": True,
+        "IgnorePublicAcls": True,
+        "BlockPublicPolicy": False,
+        "RestrictPublicBuckets": False,
+    }
+    try:
+        current = s3.get_public_access_block(Bucket=bucket_name)[
+            "PublicAccessBlockConfiguration"
+        ]
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code != "NoSuchPublicAccessBlockConfiguration":
+            print(f"✗ Could not read PublicAccessBlock ({code}): {e}")
+            return False
+        current = {}
+
+    blockers = [k for k in ("BlockPublicPolicy", "RestrictPublicBuckets") if current.get(k, True)]
+    if not blockers:
+        print("✓ PublicAccessBlock permits bucket policies")
+        return True
+
+    print(f"✗ PublicAccessBlock blocks public policies: {', '.join(blockers)}=True")
+    if not fix:
+        print("  (pass --fix to relax; ACLs will stay blocked)")
+        return False
+    try:
+        s3.put_public_access_block(
+            Bucket=bucket_name,
+            PublicAccessBlockConfiguration=desired,
+        )
+        print("✓ PublicAccessBlock updated (ACLs still blocked)")
+        return True
+    except ClientError as e:
+        print(f"✗ Failed to update PublicAccessBlock: {e}")
+        return False
+
+
+def _check_bucket_policy_statement(s3, bucket_name: str, fix: bool) -> bool:
+    """Ensure the bucket policy has our PublicReadKernelBootLogs statement."""
+    expected_stmt = _expected_bucket_policy(bucket_name)["Statement"][0]
+    expected_resource = expected_stmt["Resource"]
+
+    try:
+        policy_str = s3.get_bucket_policy(Bucket=bucket_name)["Policy"]
+        existing = json.loads(policy_str)
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code != "NoSuchBucketPolicy":
+            print(f"✗ Could not read bucket policy ({code}): {e}")
+            return False
+        existing = None
+    except (ValueError, json.JSONDecodeError) as e:
+        print(f"✗ Bucket policy is not valid JSON: {e}")
+        return False
+
+    statements = (existing or {}).get("Statement", [])
+    match = next((s for s in statements if s.get("Sid") == _PUBLIC_LOGS_SID), None)
+    if match and _statement_matches(match, expected_stmt):
+        print(f"✓ Bucket policy grants public-read on {_PUBLIC_LOGS_KEY_PATTERN}")
+        return True
+
+    if match:
+        print(f"✗ Statement '{_PUBLIC_LOGS_SID}' exists but does not match expected shape")
+    else:
+        print(f"✗ Statement '{_PUBLIC_LOGS_SID}' missing from bucket policy")
+    print(f"  Expected Resource: {expected_resource}")
+    if not fix:
+        print("  (pass --fix to add/replace the statement)")
+        return False
+
+    # Merge: drop any existing statement with our Sid, append the expected one.
+    new_statements = [s for s in statements if s.get("Sid") != _PUBLIC_LOGS_SID]
+    new_statements.append(expected_stmt)
+    new_policy = {
+        "Version": (existing or {}).get("Version", "2012-10-17"),
+        "Statement": new_statements,
+    }
+    try:
+        s3.put_bucket_policy(Bucket=bucket_name, Policy=json.dumps(new_policy))
+        print("✓ Bucket policy updated with PublicReadKernelBootLogs statement")
+        return True
+    except ClientError as e:
+        print(f"✗ Failed to update bucket policy: {e}")
+        return False
+
+
+def _statement_matches(actual: dict, expected: dict) -> bool:
+    """Compare the fields we care about; tolerate extra keys AWS may add."""
+    if actual.get("Effect") != expected["Effect"]:
+        return False
+    if actual.get("Principal") != expected["Principal"]:
+        return False
+    # Action and Resource may come back as strings or single-item lists.
+    if _as_set(actual.get("Action")) != _as_set(expected["Action"]):
+        return False
+    if _as_set(actual.get("Resource")) != _as_set(expected["Resource"]):
+        return False
+    return True
+
+
+def _as_set(value) -> set:
+    if value is None:
+        return set()
+    if isinstance(value, list):
+        return set(value)
+    return {value}
 
 
 def check_console_output_permission(region: Optional[str] = None) -> bool:
@@ -247,6 +417,12 @@ def validate(bucket: Optional[str] = None,
 
     if bucket:
         results["s3_bucket"] = check_s3_bucket(bucket, region, fix=fix)
+        # Only check the policy if the bucket exists/was created — checking
+        # against a missing bucket produces a confusing cascade of errors.
+        if results["s3_bucket"]:
+            results["s3_logs_public_policy"] = check_s3_logs_public_policy(
+                bucket, region, fix=fix
+            )
 
     results["kernelci_api_token"] = check_kernelci_api_token(api_base_uri, api_token)
     results["kcidb_jwt"] = check_kcidb_jwt()

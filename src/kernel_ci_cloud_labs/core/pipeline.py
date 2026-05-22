@@ -11,27 +11,48 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from kernel_ci_cloud_labs.auth.aws_cloudwatch_manager import AWSCloudWatchManager
+from kernel_ci_cloud_labs.core.artifacts import collect_run_artifacts
 from kernel_ci_cloud_labs.core.logging_config import create_run_directory, get_logger
 
 logger = get_logger(__name__)
 
 
 def parse_vm_logs(vms_dir):
-    """Parse VM log files and extract test statistics."""
+    """Parse VM log files and extract test statistics.
+
+    Expects one ``vms/<instance_id>.log`` per VM (written from CloudWatch
+    streams). Boot-console logs written alongside as
+    ``vms/<instance_id>-console.log`` by ``core.artifacts.collect_run_artifacts``
+    are **skipped** — they don't carry the "Test execution completed:
+    SUCCESS" marker and would otherwise double-count VMs and report every
+    boot log as a failure.
+
+    Returns:
+        dict with the aggregate counters plus an ``instances`` list:
+        ``[{"test": str, "instance_id": str, "status": "PASS"|"FAIL"}, ...]``.
+        The list is the per-VM ground truth consumed by the KCIDB submitter
+        (one tests[*] row per instance).
+    """
     stats = {
         "total_vms": 0,
         "successful": 0,
         "failed": 0,
         "test_names": set(),
         "failed_tests": {},
+        "instances": [],
     }
 
     if not vms_dir.exists():
         return stats
 
-    for log_file in vms_dir.glob("*.log"):
+    for log_file in sorted(vms_dir.glob("*.log")):
+        # Boot-console logs share the directory but are not a per-VM execution
+        # log; see docstring.
+        if log_file.name.endswith("-console.log"):
+            continue
+
         stats["total_vms"] += 1
-        log_name = log_file.stem
+        instance_id = log_file.stem  # the EC2 instance ID
 
         try:
             with open(log_file, "r", encoding="utf-8") as f:
@@ -50,11 +71,17 @@ def parse_vm_logs(vms_dir):
             # Check success/failure
             if "Test execution completed: SUCCESS" in content:
                 stats["successful"] += 1
+                status = "PASS"
             else:
                 stats["failed"] += 1
+                status = "FAIL"
                 if test_name not in stats["failed_tests"]:
                     stats["failed_tests"][test_name] = []
-                stats["failed_tests"][test_name].append(log_name)
+                stats["failed_tests"][test_name].append(instance_id)
+
+            stats["instances"].append(
+                {"test": test_name, "instance_id": instance_id, "status": status}
+            )
 
         except Exception as e:
             logger.warning("Could not parse VM log %s: %s", log_file, e)
@@ -197,6 +224,11 @@ def create_summary(run_dir, start_time, task_arn, expected_vm_count=None, s3_con
             "missing": (expected_vm_count - vm_stats["total_vms"] if expected_vm_count is not None else 0),
             "test_names": sorted(list(vm_stats["test_names"])),
             "failed_by_test": vm_stats["failed_tests"],
+            # Per-instance ground truth. The KCIDB submitter
+            # (pull_labs_poller._extract_test_results) joins this list with
+            # artifacts.json by (test, instance_id) to attach a log_url to
+            # each tests[*] row.
+            "instances": vm_stats["instances"],
         },
     }
 
@@ -235,6 +267,48 @@ def create_summary(run_dir, start_time, task_arn, expected_vm_count=None, s3_con
     return summary
 
 
+def _warn_if_logs_not_public(provider, storage):
+    """Read-only probe of the bucket's public-read policy for boot logs.
+
+    Imported lazily so that `core.pipeline` does not pull in setup_validate
+    (and its boto3 surface) at module import time for callers that only
+    need parse_vm_logs / create_summary.
+    """
+    bucket = getattr(storage, "bucket", None)
+    if not bucket:
+        return
+    try:
+        from kernel_ci_cloud_labs.setup_validate import (  # local import: optional
+            _PUBLIC_LOGS_SID,
+            _expected_bucket_policy,
+            _statement_matches,
+        )
+
+        s3_client = provider.auth.get_client("s3") if hasattr(provider, "auth") else None
+        if s3_client is None:
+            return
+        try:
+            policy_str = s3_client.get_bucket_policy(Bucket=bucket)["Policy"]
+            policy = json.loads(policy_str)
+        except Exception:  # pylint: disable=broad-exception-caught
+            policy = None
+
+        statements = (policy or {}).get("Statement", [])
+        expected = _expected_bucket_policy(bucket)["Statement"][0]
+        match = next((s for s in statements if s.get("Sid") == _PUBLIC_LOGS_SID), None)
+        if match and _statement_matches(match, expected):
+            return
+        logger.warning(
+            "Bucket %s is missing the PublicReadKernelBootLogs policy; "
+            "boot-log URLs published to KCIDB will return AccessDenied. "
+            "Run `aws setup validate --bucket %s --fix` to repair.",
+            bucket,
+            bucket,
+        )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.debug("Policy probe skipped: %s", e)
+
+
 def run_pipeline(
     provider, storage, run_dir=None
 ):  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
@@ -250,6 +324,12 @@ def run_pipeline(
     logger.info("=== Starting Pipeline ===")
     logger.info("Run directory: %s", run_dir)
     logger.debug("Provider: %s, Storage: %s", type(provider).__name__, type(storage).__name__)
+
+    # Lightweight check: are kernel boot logs going to be reachable by KCIDB
+    # dashboard users via the public S3 URL we'll publish? We only warn — a
+    # broken policy doesn't justify aborting a run, and `aws setup validate
+    # --fix` is the supported way to repair it.
+    _warn_if_logs_not_public(provider, storage)
 
     try:
         # Get test info from config
@@ -496,6 +576,28 @@ def run_pipeline(
             logger.warning("Could not retrieve VM logs: %s", e)
 
         logger.info("-" * 60)
+
+        # Pull kernel boot logs from S3 to logs/run_<ts>/vms/<id>-console.log
+        # and emit artifacts.json — the manifest the KCIDB submitter
+        # consumes to populate tests[*].log_url. Failures here are
+        # non-fatal: the test results in S3 remain the source of truth.
+        try:
+            logger.info("\n=== Collecting boot logs & artifacts manifest ===")
+            s3_client = provider.auth.get_client("s3")
+            origin = None
+            if hasattr(provider, "config") and provider.config:
+                origin = provider.config.get("kernelci", {}).get("kcidb_origin")
+            region = provider.config.get("region", "") if hasattr(provider, "config") else ""
+            collect_run_artifacts(
+                Path(run_dir),
+                s3_client=s3_client,
+                bucket=storage.bucket,
+                region=region,
+                run_prefix=run_prefix,
+                origin=origin,
+            )
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.warning("Could not collect artifacts manifest: %s", e)
 
         # Benchmark regression analysis
         try:
