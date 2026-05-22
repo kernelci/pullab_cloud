@@ -371,21 +371,38 @@ class TestNodeResultFromRows:
 
 
 class TestNodeStateUpdates:
-    """_claim_node() / _finish_node() PUT node state to kernelci-api."""
+    """_claim_node() records data.job_id; _finish_node() PUTs state=done."""
 
-    def test_claim_available_node_puts_running(self):
+    def test_claim_available_node_records_job_id(self):
+        # kernelci-api has no claimable *state*, so claiming writes the
+        # node's data.job_id ("Runtime job ID") and leaves state=available.
         p = PullLabsPoller(_minimal_kc())
         puts = []
-        with patch(_GET, return_value={"id": "n1", "state": "available"}), \
+        with patch(_GET, return_value={"id": "n1", "state": "available", "data": {}}), \
              patch(_PUT, side_effect=lambda url, payload, **kw: puts.append((url, payload))):
             assert p._claim_node({"id": "n1"}) is True
         assert len(puts) == 1
         assert puts[0][0].endswith("/node/n1")
-        assert puts[0][1]["state"] == "running"
+        # state untouched (available -> available is a no-op transition);
+        # the claim lives in data.job_id.
+        assert puts[0][1]["state"] == "available"
+        assert puts[0][1]["data"]["job_id"]
 
-    def test_claim_skips_already_claimed_node(self):
+    def test_claim_skips_node_already_claimed(self):
+        # A node that already carries a data.job_id has been picked up.
         p = PullLabsPoller(_minimal_kc())
-        with patch(_GET, return_value={"id": "n1", "state": "running"}), \
+        with patch(_GET, return_value={
+                   "id": "n1", "state": "available",
+                   "data": {"job_id": "other-poller:abc123"}}), \
+             patch(_PUT) as put:
+            assert p._claim_node({"id": "n1"}) is False
+        put.assert_not_called()
+
+    def test_claim_skips_node_no_longer_available(self):
+        # A node that has moved on from "available" (already finished by the
+        # pipeline or another poller) is skipped -- without any PUT.
+        p = PullLabsPoller(_minimal_kc())
+        with patch(_GET, return_value={"id": "n1", "state": "done"}), \
              patch(_PUT) as put:
             assert p._claim_node({"id": "n1"}) is False
         put.assert_not_called()
@@ -397,7 +414,7 @@ class TestNodeStateUpdates:
 
     def test_claim_skips_on_put_error(self):
         p = PullLabsPoller(_minimal_kc())
-        with patch(_GET, return_value={"id": "n1", "state": "available"}), \
+        with patch(_GET, return_value={"id": "n1", "state": "available", "data": {}}), \
              patch(_PUT, side_effect=urllib.error.URLError("boom")):
             assert p._claim_node({"id": "n1"}) is False
 

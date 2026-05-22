@@ -13,7 +13,8 @@
 
 Long-lived service (or one-shot job) that:
   1. Polls kernelci-api /events for new pull-lab jobs.
-  2. Claims each job node (state=running) so other pollers skip it.
+  2. Claims each job node by recording its data.job_id — kernelci-api has no
+     node state usable as a "claimed" marker (see _claim_node).
   3. Fetches each job's PULL_LABS job_definition JSON.
   4. Translates it into a pullab_cloud run config and runs the pipeline.
   5. Submits per-test results directly to KCIDB.
@@ -38,6 +39,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -627,12 +629,37 @@ class PullLabsPoller:
         return f"{self.api_base_uri.rstrip('/')}/node/{node_id}"
 
     def _claim_node(self, node: Dict[str, Any]) -> bool:
-        """Claim a job node by transitioning it to state=running.
+        """Claim a job node by recording this poller's job id on it.
 
-        Re-reads the node first: if it is no longer "available", another
-        poller has already taken it, so we skip it. This narrows -- but,
-        without an atomic compare-and-set in kernelci-api, cannot fully
-        close -- the window for two pollers claiming the same job.
+        kernelci-api has no node *state* that can serve as a "claimed"
+        marker. Its state machine (kernelci-core,
+        Node.validate_node_state_transition) only permits::
+
+            running   -> available, closing, done
+            available -> closing, done
+            closing   -> done
+
+        so a job node polled in "available" state cannot be moved to
+        "running" -- the API rejects it with HTTP 400 "Transition not allowed
+        with state: running". The only intermediate state reachable from
+        "available" is "closing", and that is unusable too: kernelci-pipeline
+        (src/timeout.py, Closing handler) auto-transitions any "closing" node
+        with no running descendants to "done" -- with no result -- within
+        ~60s, which would finish a multi-minute boot job out from under us.
+
+        Instead we claim by writing data.job_id -- the "Runtime job ID" field
+        of the node's data model (kernelci-core TestData). The pull-lab
+        poller *is* the runtime, so this is the semantically correct field;
+        the node stays "available" (available -> available is a no-op
+        transition) and the value persists because job_id is a declared
+        field. A node that already carries a data.job_id has been claimed.
+
+        The claim is best effort: kernelci-api has no compare-and-set, so the
+        PUT is a full-document overwrite and two pollers that both read the
+        node before either writes can each claim it. Parallel pollers must
+        therefore be partitioned by platform (KERNELCI_PLATFORMS) so they
+        never compete for the same node; this claim only skips a node already
+        taken or finished, it cannot guarantee exclusion.
 
         Returns True only if this poller now owns the node.
         """
@@ -648,16 +675,30 @@ class PullLabsPoller:
             return False
         state = current.get("state")
         if state != "available":
-            logger.info("Skipping node %s: already claimed (state=%s)", node_id, state)
+            logger.info(
+                "Skipping node %s: no longer available (state=%s)", node_id, state
+            )
             return False
-        current["state"] = "running"
+        data = current.get("data") or {}
+        existing = data.get("job_id")
+        if existing:
+            logger.info(
+                "Skipping node %s: already claimed (data.job_id=%s)",
+                node_id, existing,
+            )
+            return False
+        job_id = f"{self.runtime_name}:{uuid.uuid4().hex}"
+        data["job_id"] = job_id
+        current["data"] = data
         payload = {k: v for k, v in current.items() if k not in NODE_READ_ONLY_FIELDS}
         try:
+            # HTTPError is a URLError subclass, so a 400/422 from the PUT is
+            # caught here too: a failed claim just skips the node.
             _http_put_json(url, payload, token=self.api_token)
         except (urllib.error.URLError, json.JSONDecodeError) as e:
-            logger.error("Failed to claim node %s (PUT state=running): %s", node_id, e)
+            logger.error("Failed to claim node %s (PUT data.job_id): %s", node_id, e)
             return False
-        logger.info("Claimed node %s (state=running)", node_id)
+        logger.info("Claimed node %s (data.job_id=%s)", node_id, job_id)
         return True
 
     def _finish_node(self, node_id: str, outcome: NodeOutcome) -> bool:
@@ -705,11 +746,11 @@ class PullLabsPoller:
     def process_event(self, event: Dict[str, Any]) -> bool:
         """Process one event end to end. Returns True on success.
 
-        The job node is claimed (state=running) before any work starts and
-        finished (state=done + result, plus error_code/error_msg on an
-        infrastructure failure) afterwards, whatever the outcome. A node we
-        fail to claim -- already taken, or an API error -- is skipped
-        without being run or submitted.
+        The job node is claimed (data.job_id recorded) before any work
+        starts and finished (state=done + result, plus error_code/error_msg
+        on an infrastructure failure) afterwards, whatever the outcome. A
+        node we cannot claim -- already taken, finished, or an API error --
+        is skipped without being run or submitted.
         """
         node = event.get("node") or {}
         node_id = node.get("id")
