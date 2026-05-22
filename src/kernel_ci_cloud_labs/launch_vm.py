@@ -15,6 +15,8 @@ import uuid
 import boto3
 from botocore.config import Config
 
+from kernel_ci_cloud_labs.core.log_scrub import scrub_text
+
 
 def log_error(msg):
     """Print error to stderr (shows in container log)."""
@@ -400,6 +402,15 @@ chmod +x /tmp/test-vm-client.sh
         except Exception:
             output = output_b64
 
+        # Scrub before upload. The bucket is public-read (KCIDB dashboard users
+        # follow the URL we publish), so any secret that lands here would be
+        # world-visible. Counters are logged; original strings are not.
+        scrubbed, redaction_counts = scrub_text(output)
+        if redaction_counts:
+            summary = ", ".join(f"{k}={v}" for k, v in sorted(redaction_counts.items()))
+            log_not(f"  Console scrub redacted: {summary}")
+        output = scrubbed
+
         s3_key = f"{self.run_prefix}/test_{self.test}/output/{self.instance_id}/console-output.log"
         try:
             self.s3.put_object(
@@ -407,7 +418,12 @@ chmod +x /tmp/test-vm-client.sh
                 Key=s3_key,
                 Body=output.encode("utf-8"),
                 ContentType="text/plain; charset=utf-8",
-                Metadata={"capture-reason": reason},
+                Metadata={
+                    "capture-reason": reason,
+                    # Records that the buffer passed through the scrubber, so an
+                    # operator inspecting the object knows it's not raw.
+                    "scrubbed": "v1",
+                },
             )
             log_not(f"✓ Console output uploaded ({len(output)} bytes) to s3://{self.s3_bucket}/{s3_key}")
             self._console_captured = True
