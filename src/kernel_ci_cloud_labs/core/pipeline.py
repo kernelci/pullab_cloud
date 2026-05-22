@@ -18,21 +18,41 @@ logger = get_logger(__name__)
 
 
 def parse_vm_logs(vms_dir):
-    """Parse VM log files and extract test statistics."""
+    """Parse VM log files and extract test statistics.
+
+    Expects one ``vms/<instance_id>.log`` per VM (written from CloudWatch
+    streams). Boot-console logs written alongside as
+    ``vms/<instance_id>-console.log`` by ``core.artifacts.collect_run_artifacts``
+    are **skipped** — they don't carry the "Test execution completed:
+    SUCCESS" marker and would otherwise double-count VMs and report every
+    boot log as a failure.
+
+    Returns:
+        dict with the aggregate counters plus an ``instances`` list:
+        ``[{"test": str, "instance_id": str, "status": "PASS"|"FAIL"}, ...]``.
+        The list is the per-VM ground truth consumed by the KCIDB submitter
+        (one tests[*] row per instance).
+    """
     stats = {
         "total_vms": 0,
         "successful": 0,
         "failed": 0,
         "test_names": set(),
         "failed_tests": {},
+        "instances": [],
     }
 
     if not vms_dir.exists():
         return stats
 
-    for log_file in vms_dir.glob("*.log"):
+    for log_file in sorted(vms_dir.glob("*.log")):
+        # Boot-console logs share the directory but are not a per-VM execution
+        # log; see docstring.
+        if log_file.name.endswith("-console.log"):
+            continue
+
         stats["total_vms"] += 1
-        log_name = log_file.stem
+        instance_id = log_file.stem  # the EC2 instance ID
 
         try:
             with open(log_file, "r", encoding="utf-8") as f:
@@ -51,11 +71,17 @@ def parse_vm_logs(vms_dir):
             # Check success/failure
             if "Test execution completed: SUCCESS" in content:
                 stats["successful"] += 1
+                status = "PASS"
             else:
                 stats["failed"] += 1
+                status = "FAIL"
                 if test_name not in stats["failed_tests"]:
                     stats["failed_tests"][test_name] = []
-                stats["failed_tests"][test_name].append(log_name)
+                stats["failed_tests"][test_name].append(instance_id)
+
+            stats["instances"].append(
+                {"test": test_name, "instance_id": instance_id, "status": status}
+            )
 
         except Exception as e:
             logger.warning("Could not parse VM log %s: %s", log_file, e)
@@ -198,6 +224,11 @@ def create_summary(run_dir, start_time, task_arn, expected_vm_count=None, s3_con
             "missing": (expected_vm_count - vm_stats["total_vms"] if expected_vm_count is not None else 0),
             "test_names": sorted(list(vm_stats["test_names"])),
             "failed_by_test": vm_stats["failed_tests"],
+            # Per-instance ground truth. The KCIDB submitter
+            # (pull_labs_poller._extract_test_results) joins this list with
+            # artifacts.json by (test, instance_id) to attach a log_url to
+            # each tests[*] row.
+            "instances": vm_stats["instances"],
         },
     }
 
