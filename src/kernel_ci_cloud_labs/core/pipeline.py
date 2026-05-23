@@ -177,7 +177,14 @@ def _log_vm_output_excerpts(s3_client, bucket, run_prefix, failed_tests):
             pass
 
 
-def create_summary(run_dir, start_time, task_arn, expected_vm_count=None, s3_context=None):
+def create_summary(
+    run_dir,
+    start_time,
+    task_arn,
+    expected_vm_count=None,
+    s3_context=None,
+    container_failure_log_url=None,
+):
     """Create summary.json with VM statistics.
 
     Args:
@@ -186,6 +193,10 @@ def create_summary(run_dir, start_time, task_arn, expected_vm_count=None, s3_con
         task_arn: ARN of the ECS task that ran the tests.
         expected_vm_count: Number of VMs expected to spawn (None if unknown).
         s3_context: Optional dict with 'bucket', 'run_prefix', 'region', 's3_client' for debug output.
+        container_failure_log_url: Public URL of the ECS container's own log when
+            it exited non-zero before launching any VM. The KCIDB submitter
+            uses this as ``tests[*].log_url`` for the synthetic Infrastructure
+            row so users have a link to the actual failure reason.
     """
     end_time = time.time()
     total_runtime = end_time - start_time
@@ -230,6 +241,7 @@ def create_summary(run_dir, start_time, task_arn, expected_vm_count=None, s3_con
             # each tests[*] row.
             "instances": vm_stats["instances"],
         },
+        "container_failure_log_url": container_failure_log_url,
     }
 
     summary_file = Path(run_dir) / "summary.json"
@@ -459,6 +471,15 @@ def run_pipeline(
             logger.error("Task did not complete successfully: %s", e)
             raise
 
+        # A non-zero container exit means launch_vm.py died before SSM ever
+        # ran on a VM — the /ec2/.../<run_prefix> log group will never appear,
+        # so we shorten the VM-log wait below and surface container.log as
+        # the failure URL instead of an absent kernel log.
+        container_failed = bool(final_status) and any(
+            (c.get("exit_code") or 0) != 0
+            for c in (final_status.get("containers") or [])
+        )
+
         logger.info("-" * 60)
 
         # Refresh CloudWatch client — credentials may have expired during the wait
@@ -496,7 +517,15 @@ def run_pipeline(
 
             # Wait for VM logs to appear (CloudWatch agent ships in batches
             # after the VM shuts down — give it up to 5 min to surface).
-            max_retries = 10
+            # When the container itself failed, no VM was ever launched, so
+            # the log group can't appear — skip straight to the single probe.
+            if container_failed:
+                logger.info(
+                    "Container exited non-zero; skipping extended VM-log wait"
+                )
+                max_retries = 1
+            else:
+                max_retries = 10
             retry_delay = 30
 
             for attempt in range(max_retries):
@@ -581,6 +610,7 @@ def run_pipeline(
         # and emit artifacts.json — the manifest the KCIDB submitter
         # consumes to populate tests[*].log_url. Failures here are
         # non-fatal: the test results in S3 remain the source of truth.
+        container_failure_log_url = None
         try:
             logger.info("\n=== Collecting boot logs & artifacts manifest ===")
             s3_client = provider.auth.get_client("s3")
@@ -596,6 +626,32 @@ def run_pipeline(
                 run_prefix=run_prefix,
                 origin=origin,
             )
+
+            # Container died before any VM booted -> there is no kernel log.
+            # Publish the container's own log as the failure URL so KCIDB
+            # users land on something actionable instead of a dead link.
+            if container_failed and container_log_file.exists():
+                from kernel_ci_cloud_labs.core.artifacts import s3_public_url
+
+                failure_key = f"{run_prefix}/container-failure.log"
+                try:
+                    s3_client.upload_file(
+                        str(container_log_file),
+                        storage.bucket,
+                        failure_key,
+                        ExtraArgs={"ContentType": "text/plain; charset=utf-8"},
+                    )
+                    container_failure_log_url = s3_public_url(
+                        storage.bucket, region, failure_key
+                    )
+                    logger.info(
+                        "✓ Uploaded container failure log to %s",
+                        container_failure_log_url,
+                    )
+                except Exception as upload_err:  # pylint: disable=broad-exception-caught
+                    logger.warning(
+                        "Could not upload container failure log: %s", upload_err
+                    )
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning("Could not collect artifacts manifest: %s", e)
 
@@ -686,4 +742,9 @@ def run_pipeline(
         task_arn if "task_arn" in locals() else None,
         expected_vm_count if "expected_vm_count" in locals() else None,
         s3_context=s3_context,
+        container_failure_log_url=(
+            container_failure_log_url
+            if "container_failure_log_url" in locals()
+            else None
+        ),
     )
