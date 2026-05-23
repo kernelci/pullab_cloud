@@ -433,11 +433,21 @@ def _extract_test_results(summary: Dict[str, Any]) -> Tuple[List[Dict[str, Any]]
     when ``summary["vms"]["instances"]`` is absent — keeps older
     in-flight summary files and unit tests using the old shape working.
 
-    The second tuple element (legacy ``log_url`` slot) is always ``None``;
-    log URLs are now per-row and live in ``row["log_url"]``.
+    The second tuple element (legacy job-level ``log_url`` slot) is normally
+    ``None`` — per-row URLs live in ``row["log_url"]`` — but is set to
+    ``summary["container_failure_log_url"]`` when the ECS container died
+    before any VM booted, so the fallback Infrastructure row downstream still
+    carries a clickable failure log.
     """
     vms = summary.get("vms", {}) or {}
     instances = vms.get("instances")
+
+    # When the ECS container itself failed before launching any VM, there is
+    # no kernel log to publish. The pipeline uploads the container's own log
+    # to S3 and records its URL here so the synthetic Infrastructure row that
+    # the caller falls back to (build_test_row(..., log_url=log_url, ...)) at
+    # least links the user to the actual failure reason.
+    container_failure_log_url = summary.get("container_failure_log_url")
 
     # Legacy path: no per-instance breakdown -> one row per test name, no URLs.
     if not instances:
@@ -447,7 +457,7 @@ def _extract_test_results(summary: Dict[str, Any]) -> Tuple[List[Dict[str, Any]]
         for name in test_names:
             status = "FAIL" if failed_by_test.get(name) else "PASS"
             rows.append({"name": _test_name_to_path(name), "status": status})
-        return rows, None
+        return rows, container_failure_log_url
 
     url_by_pair = _load_artifact_log_urls(summary.get("run_directory"))
     rows = []
