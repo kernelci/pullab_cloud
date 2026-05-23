@@ -35,6 +35,35 @@ def log_not(msg):  # pylint: disable=unused-argument
     # Info messages only appear in VM CloudWatch logs, not container log
 
 
+# Kernel-side fatal/near-fatal markers we scan captured console buffers for.
+# Hit on any of these gets logged loudly and stamped into the S3 object
+# metadata so downstream consumers (KCIDB submitter, triage tooling) can
+# flag the run without re-parsing the log. Patterns are case-sensitive
+# substrings — kernel prints these verbatim.
+PANIC_PATTERNS = (
+    "Kernel panic - not syncing",
+    "Oops: ",
+    "BUG: ",
+    "Call Trace:",
+    "general protection fault",
+    "Unable to handle kernel",
+    "double fault",
+    "watchdog: BUG: soft lockup",
+    "rcu_sched detected stalls",
+    "page fault in interrupt",
+)
+
+
+def _scan_for_panic(text):
+    """Return the first PANIC_PATTERNS substring found in text, or None."""
+    if not text:
+        return None
+    for pattern in PANIC_PATTERNS:
+        if pattern in text:
+            return pattern
+    return None
+
+
 class VMLauncher:
     """Launch and manage EC2 instances with multi-run test support."""
 
@@ -365,16 +394,23 @@ chmod +x /tmp/test-vm-client.sh
     def capture_console_output(self, reason="cleanup"):
         """Fetch EC2 serial console output (kernel boot log) and upload to S3.
 
-        Safe to call multiple times: subsequent calls will overwrite the S3
-        object with a (typically larger) snapshot. Once we have successfully
-        captured a non-empty buffer, later calls are skipped — except when
-        forced via a different `reason` from the SSM-failure path, where the
-        most recent state of the buffer is more interesting than an earlier
-        capture taken before the failure was visible.
+        Re-entrancy rules:
+          * "cleanup" is the best-effort pre-terminate pass. It's skipped if
+            a previous call already uploaded — there's nothing new to fetch
+            while the VM is still running and the buffer only grows.
+          * "ssm-failure" and "post-terminate" always run. The first catches
+            a panic visible mid-run; the second catches the flushed final
+            buffer that EC2 only finalizes after shutdown — typically the
+            only place an early-boot panic actually shows up. Both can
+            overwrite an earlier (smaller) capture.
+
+        Also scans the scrubbed output for PANIC_PATTERNS and stamps the
+        result into the S3 object metadata so triage tooling can flag a run
+        without re-reading the log.
 
         Args:
             reason: Free-text label for the call site (logged for diagnostics).
-                Currently used values: "cleanup", "ssm-failure".
+                Currently used values: "cleanup", "ssm-failure", "post-terminate".
         """
         if not self.instance_id:
             return
@@ -411,6 +447,15 @@ chmod +x /tmp/test-vm-client.sh
             log_not(f"  Console scrub redacted: {summary}")
         output = scrubbed
 
+        # Panic scan runs on the scrubbed buffer so the pattern we log can't
+        # re-leak a token the scrubber just redacted.
+        panic_match = _scan_for_panic(output)
+        if panic_match:
+            log_error(
+                f"⚠ Kernel panic indicator in console buffer "
+                f"(instance={self.instance_id}, marker={panic_match!r}, reason={reason})"
+            )
+
         s3_key = f"{self.run_prefix}/test_{self.test}/output/{self.instance_id}/console-output.log"
         try:
             self.s3.put_object(
@@ -423,6 +468,7 @@ chmod +x /tmp/test-vm-client.sh
                     # Records that the buffer passed through the scrubber, so an
                     # operator inspecting the object knows it's not raw.
                     "scrubbed": "v1",
+                    "panic-detected": "true" if panic_match else "false",
                 },
             )
             log_not(f"✓ Console output uploaded ({len(output)} bytes) to s3://{self.s3_bucket}/{s3_key}")
@@ -430,17 +476,78 @@ chmod +x /tmp/test-vm-client.sh
         except Exception as e:
             log_not(f"  Failed to upload console output: {e}")
 
+    def _wait_for_terminated(self, timeout=90):
+        """Poll describe_instances until the VM reaches a terminal state.
+
+        EC2 only finalizes the serial-console buffer at shutdown; a
+        get_console_output call against a still-running short-lived VM
+        often returns empty because the async mirror hasn't caught up. By
+        waiting for ``terminated``/``stopped`` we can re-fetch and get the
+        buffer that includes early-boot output and any panic on shutdown.
+
+        Bounded by ``timeout`` so a stuck instance can't pin the pipeline.
+        Returns True if a terminal state was observed, False on timeout or
+        API error (caller proceeds either way).
+        """
+        if not self.instance_id:
+            return False
+        log_not(f"Waiting up to {timeout}s for instance {self.instance_id} to reach terminated/stopped state...")
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                resp = self.ec2.describe_instances(InstanceIds=[self.instance_id])
+                reservations = resp.get("Reservations", [])
+                if not reservations or not reservations[0].get("Instances"):
+                    # Instance metadata aged out — treat as terminal.
+                    return True
+                state = reservations[0]["Instances"][0]["State"]["Name"]
+                if state in ("terminated", "stopped"):
+                    log_not(f"✓ Instance state: {state} (after {int(time.time() - start)}s)")
+                    return True
+            except Exception as e:
+                log_not(f"  describe_instances error: {e} (continuing without wait)")
+                return False
+            time.sleep(5)
+        log_not(f"⚠ Timed out waiting for instance to terminate after {timeout}s")
+        return False
+
     def cleanup(self):
-        """Capture console output, then terminate instance."""
+        """Hybrid console capture around instance termination.
+
+        Two captures bracket the terminate call:
+
+          1. Pre-terminate (``reason="cleanup"``) — best-effort while the VM
+             is still alive. Often empty for short-lived VMs (EC2's mirror
+             lags by minutes), but on a longer run this is the only way to
+             grab the buffer if termination later hangs.
+          2. Post-terminate (``reason="post-terminate"``) — after shutdown
+             EC2 finalizes and preserves the buffer for ~1h. This is the
+             pass that reliably catches the boot log, kernel panics, and
+             any shutdown-time oops.
+
+        The capture path scans for panic markers and stamps metadata on
+        whichever upload wins (post-terminate overwrites cleanup).
+        """
+        # Best-effort live capture. Skipped silently inside the helper if a
+        # prior ssm-failure capture already uploaded.
         self.capture_console_output(reason="cleanup")
 
-        if self.instance_id:
-            log_not(f"\n=== Terminating instance {self.instance_id} ===")
-            try:
-                self.ec2.terminate_instances(InstanceIds=[self.instance_id])
-                log_not("✓ Instance terminated")
-            except Exception as e:
-                log_not(f"Error terminating instance: {e}")
+        if not self.instance_id:
+            return
+
+        log_not(f"\n=== Terminating instance {self.instance_id} ===")
+        try:
+            self.ec2.terminate_instances(InstanceIds=[self.instance_id])
+            log_not("✓ Termination requested")
+        except Exception as e:
+            log_not(f"Error terminating instance: {e}")
+            return
+
+        # Wait for the VM to actually wind down, then grab the flushed
+        # buffer. This is where an early-boot panic that never made it into
+        # the live mirror finally becomes visible.
+        self._wait_for_terminated(timeout=90)
+        self.capture_console_output(reason="post-terminate")
 
 
 def launch_vms_from_config():
