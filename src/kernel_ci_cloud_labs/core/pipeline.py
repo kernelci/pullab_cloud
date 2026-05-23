@@ -313,7 +313,8 @@ def _warn_if_logs_not_public(provider, storage):
         logger.warning(
             "Bucket %s is missing the PublicReadKernelBootLogs policy; "
             "boot-log URLs published to KCIDB will return AccessDenied. "
-            "Run `aws setup validate --bucket %s --fix` to repair.",
+            "Run `kernel-ci-cloud-runner aws setup validate --bucket %s --fix` "
+            "to repair.",
             bucket,
             bucket,
         )
@@ -339,8 +340,9 @@ def run_pipeline(
 
     # Lightweight check: are kernel boot logs going to be reachable by KCIDB
     # dashboard users via the public S3 URL we'll publish? We only warn — a
-    # broken policy doesn't justify aborting a run, and `aws setup validate
-    # --fix` is the supported way to repair it.
+    # broken policy doesn't justify aborting a run, and
+    # `kernel-ci-cloud-runner aws setup validate --fix` is the supported way
+    # to repair it.
     _warn_if_logs_not_public(provider, storage)
 
     try:
