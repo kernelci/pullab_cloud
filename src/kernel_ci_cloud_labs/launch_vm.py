@@ -30,9 +30,17 @@ def log_info(msg):
     sys.stdout.flush()
 
 
-def log_not(msg):  # pylint: disable=unused-argument
-    """Suppress info messages from container log (only in VM logs)."""
-    # Info messages only appear in VM CloudWatch logs, not container log
+def log_not(msg):
+    """Print info-level diagnostic to stdout (lands in ECS container log).
+
+    Previously a no-op, which made the console-capture / cleanup path
+    impossible to debug — failures like "No console output available yet"
+    or "Failed to upload console output" were swallowed. Routed to stdout
+    so it shows up in CloudWatch under the container log group without
+    being styled as an error.
+    """
+    sys.stdout.write(f"INFO: {msg}\n")
+    sys.stdout.flush()
 
 
 # Kernel-side fatal/near-fatal markers we scan captured console buffers for.
@@ -421,16 +429,57 @@ chmod +x /tmp/test-vm-client.sh
             return
 
         log_not(f"\n=== Capturing console output ({reason}) ===")
-        try:
-            resp = self.ec2.get_console_output(InstanceId=self.instance_id, Latest=True)
-        except Exception as e:
-            log_not(f"  Failed to fetch console output: {e}")
-            return
 
-        output_b64 = resp.get("Output", "")
-        if not output_b64:
-            log_not("  No console output available yet")
-            return
+        # EC2 mirrors the serial console asynchronously. State==terminated
+        # does not mean the buffer is flushed: short-lived VMs commonly
+        # return an empty Output for 1–3 min after termination. Poll on
+        # the post-terminate pass; one-shot is fine for cleanup/ssm-failure
+        # because post-terminate covers the lag.
+        output_b64 = ""
+        if reason == "post-terminate":
+            poll_budget = 240  # 4 min; EC2 mirror typically settles in 1–3 min
+            poll_interval = 15
+            start = time.time()
+            attempt = 0
+            while time.time() - start < poll_budget:
+                attempt += 1
+                try:
+                    resp = self.ec2.get_console_output(
+                        InstanceId=self.instance_id, Latest=True
+                    )
+                    output_b64 = resp.get("Output", "")
+                except Exception as e:
+                    log_not(f"  get_console_output error (attempt {attempt}): {e}")
+                    output_b64 = ""
+                if output_b64:
+                    log_not(
+                        f"  Console buffer available on attempt {attempt} "
+                        f"(after {int(time.time() - start)}s)"
+                    )
+                    break
+                log_not(
+                    f"  Console buffer empty (attempt {attempt}); "
+                    f"retrying in {poll_interval}s"
+                )
+                time.sleep(poll_interval)
+            if not output_b64:
+                log_not(
+                    f"  No console output after {attempt} attempts "
+                    f"({int(time.time() - start)}s) — EC2 mirror never flushed"
+                )
+                return
+        else:
+            try:
+                resp = self.ec2.get_console_output(
+                    InstanceId=self.instance_id, Latest=True
+                )
+            except Exception as e:
+                log_not(f"  Failed to fetch console output: {e}")
+                return
+            output_b64 = resp.get("Output", "")
+            if not output_b64:
+                log_not("  No console output available yet")
+                return
 
         # boto3 returns the buffer base64-encoded; decode for human-readable upload.
         try:
