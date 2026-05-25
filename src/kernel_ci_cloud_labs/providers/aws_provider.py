@@ -6,6 +6,7 @@ __copyright__ = "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserv
 
 
 # providers/aws_provider.py
+import json
 import os
 import re
 import time
@@ -97,9 +98,6 @@ class AWSProvider(BaseProvider):
         logger.debug("Network config: %s", network_config)
 
         # Build environment overrides with runtime config
-        import json
-        import time
-
         env_vars = []
 
         # Pass run prefix
@@ -123,6 +121,14 @@ class AWSProvider(BaseProvider):
         if ec2_log_group:
             env_vars.append({"name": "EC2_LOG_GROUP", "value": ec2_log_group})
             logger.debug("Passing EC2_LOG_GROUP to container: %s", ec2_log_group)
+
+        # Forward KCI_DEBUG to the container so launch_vm.log_debug() lines
+        # show up in the ECS task log group. Set on the host running the
+        # poller: KCI_DEBUG=1 ./prod-amd64.sh
+        kci_debug = os.environ.get("KCI_DEBUG")
+        if kci_debug:
+            env_vars.append({"name": "KCI_DEBUG", "value": kci_debug})
+            logger.debug("Passing KCI_DEBUG to container: %s", kci_debug)
 
         # Always pass test config via S3 in results bucket
         if self.config.get("test_config"):

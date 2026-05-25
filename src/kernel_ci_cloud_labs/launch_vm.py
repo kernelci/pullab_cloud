@@ -7,15 +7,24 @@ __copyright__ = "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserv
 
 import base64
 import json
+import os
 import shlex
 import sys
+import threading
 import time
+import traceback
 import uuid
 
 import boto3
 from botocore.config import Config
 
 from kernel_ci_cloud_labs.core.log_scrub import scrub_text
+
+
+# Enable verbose diagnostics by setting KCI_DEBUG=1 (or true/yes/on) on the
+# ECS task. log_debug() lines land in the container log group alongside
+# INFO/ERROR. Defaults to off so production logs stay quiet.
+_DEBUG_ENABLED = os.environ.get("KCI_DEBUG", "").lower() in ("1", "true", "yes", "on")
 
 
 def log_error(msg):
@@ -41,6 +50,30 @@ def log_not(msg):
     """
     sys.stdout.write(f"INFO: {msg}\n")
     sys.stdout.flush()
+
+
+def log_debug(msg):
+    """Print debug diagnostic only when KCI_DEBUG is set in the environment.
+
+    Used to dump intermediate state (response shapes, retry timing, buffer
+    lengths) without polluting normal production runs.
+    """
+    if _DEBUG_ENABLED:
+        sys.stdout.write(f"DEBUG: {msg}\n")
+        sys.stdout.flush()
+
+
+def log_exception(prefix, exc):
+    """Log an exception with full traceback to stderr.
+
+    Use on any catch site where a bare ``log_error(str(e))`` would hide
+    the call stack — boto3 errors in particular need the traceback to
+    distinguish a NoCredentialsError from a ClientError from a transient
+    network blip.
+    """
+    sys.stderr.write(f"ERROR: {prefix}: {exc!r}\n")
+    sys.stderr.write(traceback.format_exc())
+    sys.stderr.flush()
 
 
 # Kernel-side fatal/near-fatal markers we scan captured console buffers for.
@@ -437,10 +470,15 @@ chmod +x /tmp/test-vm-client.sh
         # because post-terminate covers the lag.
         output_b64 = ""
         if reason == "post-terminate":
-            poll_budget = 240  # 4 min; EC2 mirror typically settles in 1–3 min
+            # AWS documents the serial-console mirror update cadence as
+            # "approximately every 5 minutes" — arm64/Graviton tends to be
+            # at the slow end. 9 min gives the mirror two full cycles to
+            # show up; 15 s polling keeps API cost bounded.
+            poll_budget = 540
             poll_interval = 15
             start = time.time()
             attempt = 0
+            last_exc_repr = None
             while time.time() - start < poll_budget:
                 attempt += 1
                 try:
@@ -448,13 +486,22 @@ chmod +x /tmp/test-vm-client.sh
                         InstanceId=self.instance_id, Latest=True
                     )
                     output_b64 = resp.get("Output", "")
+                    log_debug(
+                        f"get_console_output attempt={attempt} "
+                        f"output_len_b64={len(output_b64)} "
+                        f"keys={sorted(resp.keys())}"
+                    )
                 except Exception as e:
-                    log_not(f"  get_console_output error (attempt {attempt}): {e}")
+                    last_exc_repr = repr(e)
+                    log_exception(
+                        f"get_console_output failed (attempt {attempt})", e
+                    )
                     output_b64 = ""
                 if output_b64:
                     log_not(
                         f"  Console buffer available on attempt {attempt} "
-                        f"(after {int(time.time() - start)}s)"
+                        f"(after {int(time.time() - start)}s, "
+                        f"b64_len={len(output_b64)})"
                     )
                     break
                 log_not(
@@ -463,9 +510,11 @@ chmod +x /tmp/test-vm-client.sh
                 )
                 time.sleep(poll_interval)
             if not output_b64:
-                log_not(
-                    f"  No console output after {attempt} attempts "
-                    f"({int(time.time() - start)}s) — EC2 mirror never flushed"
+                log_error(
+                    f"No console output after {attempt} attempts "
+                    f"({int(time.time() - start)}s, budget {poll_budget}s) — "
+                    f"EC2 mirror never flushed for instance {self.instance_id}"
+                    + (f"; last exception: {last_exc_repr}" if last_exc_repr else "")
                 )
                 return
         else:
@@ -473,10 +522,15 @@ chmod +x /tmp/test-vm-client.sh
                 resp = self.ec2.get_console_output(
                     InstanceId=self.instance_id, Latest=True
                 )
+                output_b64 = resp.get("Output", "")
+                log_debug(
+                    f"get_console_output (reason={reason}) "
+                    f"output_len_b64={len(output_b64)} "
+                    f"keys={sorted(resp.keys())}"
+                )
             except Exception as e:
-                log_not(f"  Failed to fetch console output: {e}")
+                log_exception(f"get_console_output failed (reason={reason})", e)
                 return
-            output_b64 = resp.get("Output", "")
             if not output_b64:
                 log_not("  No console output available yet")
                 return
@@ -523,7 +577,10 @@ chmod +x /tmp/test-vm-client.sh
             log_not(f"✓ Console output uploaded ({len(output)} bytes) to s3://{self.s3_bucket}/{s3_key}")
             self._console_captured = True
         except Exception as e:
-            log_not(f"  Failed to upload console output: {e}")
+            log_exception(
+                f"Failed to upload console output to s3://{self.s3_bucket}/{s3_key}",
+                e,
+            )
 
     def _wait_for_terminated(self, timeout=90):
         """Poll describe_instances until the VM reaches a terminal state.
@@ -577,9 +634,14 @@ chmod +x /tmp/test-vm-client.sh
         The capture path scans for panic markers and stamps metadata on
         whichever upload wins (post-terminate overwrites cleanup).
         """
-        # Best-effort live capture. Skipped silently inside the helper if a
-        # prior ssm-failure capture already uploaded.
-        self.capture_console_output(reason="cleanup")
+        # Each stage is wrapped so one failure doesn't silently abort the
+        # remaining cleanup work. Previously a boto3 error in terminate or
+        # an unhandled exception in capture would short-circuit cleanup and
+        # leave no traceback in the container log.
+        try:
+            self.capture_console_output(reason="cleanup")
+        except Exception as e:
+            log_exception("capture_console_output(cleanup) raised", e)
 
         if not self.instance_id:
             return
@@ -589,20 +651,30 @@ chmod +x /tmp/test-vm-client.sh
             self.ec2.terminate_instances(InstanceIds=[self.instance_id])
             log_not("✓ Termination requested")
         except Exception as e:
-            log_not(f"Error terminating instance: {e}")
-            return
+            log_exception(
+                f"terminate_instances failed for {self.instance_id}", e
+            )
+            # Still attempt post-terminate capture: instance may already be
+            # in a terminal state, in which case GetConsoleOutput still
+            # works against the preserved buffer.
 
         # Wait for the VM to actually wind down, then grab the flushed
         # buffer. This is where an early-boot panic that never made it into
         # the live mirror finally becomes visible.
-        self._wait_for_terminated(timeout=90)
-        self.capture_console_output(reason="post-terminate")
+        try:
+            self._wait_for_terminated(timeout=90)
+        except Exception as e:
+            log_exception("_wait_for_terminated raised", e)
+
+        try:
+            self.capture_console_output(reason="post-terminate")
+        except Exception as e:
+            log_exception("capture_console_output(post-terminate) raised", e)
 
 
 def launch_vms_from_config():
     """Launch and test multiple VMs from environment variables (no config file needed)."""
-    import os
-    import threading
+    log_info(f"launch_vm startup: KCI_DEBUG={'on' if _DEBUG_ENABLED else 'off'}")
 
     # Read config from environment variables
     run_prefix = os.getenv("RUN_PREFIX")
@@ -730,10 +802,17 @@ def launch_vms_from_config():
                 results_list.append({"vm_name": vm_name, "success": False})
 
         except Exception as e:
-            log_error(f"FAILED: {vm_name} - {e}")
+            log_exception(f"FAILED: {vm_name}", e)
             results_list.append({"vm_name": vm_name, "success": False})
         finally:
-            launcher.cleanup()
+            # cleanup() is already internally guarded per-stage, but a thread
+            # that escapes its target with an unhandled exception is silent
+            # by default — wrap once more so any surviving error reaches
+            # the container log with a traceback.
+            try:
+                launcher.cleanup()
+            except Exception as e:
+                log_exception(f"cleanup raised for {vm_name}", e)
 
     # Launch all VMs in parallel using threads
     threads = []
