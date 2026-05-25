@@ -507,11 +507,20 @@ class NodeOutcome:
     *error_code* / *error_msg* go into the node's ``data`` and are set only
     on an infrastructure failure (result == "incomplete"), matching the
     kernelci-pipeline scheduler convention.
+
+    *artifacts* is merged into the node's existing ``artifacts`` dict on
+    finish. kernelci-pipeline's send_kcidb keys on ``artifacts.test_log``
+    (or ``lava_log``) when emitting the maestro-origin KCIDB row's
+    ``log_url`` — see kernelci-pipeline/src/send_kcidb.py:579-582 and
+    ``_get_artifacts`` (send_kcidb.py:443-455), which walks the parent
+    chain, so a value written on the job node is visible to every test
+    descendant.
     """
 
     result: str
     error_code: Optional[str] = None
     error_msg: Optional[str] = None
+    artifacts: Optional[Dict[str, str]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -793,6 +802,13 @@ class PullLabsPoller:
             data["error_code"] = outcome.error_code
             data["error_msg"] = outcome.error_msg
             current["data"] = data
+        if outcome.artifacts:
+            # Merge (don't replace) so we never blow away artifacts a
+            # previous step put on the node — e.g. job_definition, which
+            # event polling reads via node.artifacts.job_definition.
+            artifacts = current.get("artifacts") or {}
+            artifacts.update(outcome.artifacts)
+            current["artifacts"] = artifacts
         payload = {k: v for k, v in current.items() if k not in NODE_READ_ONLY_FIELDS}
         try:
             _http_put_json(url, payload, token=self.api_token)
@@ -954,21 +970,62 @@ class PullLabsPoller:
             ]
 
         # error_code + "incomplete" only on an infrastructure failure; a job
-        # that actually ran is pass/fail/skip from its tests. Independent of
-        # whether the KCIDB submission below succeeds.
+        # that actually ran is pass/fail/skip from its tests.
         outcome = infra_error or NodeOutcome(_node_result_from_rows(test_rows))
-        try:
-            submit_tests(
-                self.kcidb_submit_url,
-                self.kcidb_jwt,
-                self.kcidb_origin,
-                build_id,
-                test_rows,
+
+        # --- KCIDB direct submission DISABLED -----------------------------
+        # We used to POST these test_rows to KCIDB ourselves under origin
+        # `pull_labs_aws_ec2`. That produced a parallel row keyed
+        # (pull_labs_aws_ec2, <node_id>.<instance_id>) which KCIDB stored
+        # but the dashboard never displayed, because the dashboard looks up
+        # the maestro-origin row (origin=maestro, id=maestro:<node_id>)
+        # emitted by kernelci-pipeline's send_kcidb. Net effect: our log_url
+        # landed in KCIDB but was invisible (see archive submissions
+        # uIuuMb... vs. l6CD9xy... — same node, two origins, only ours had
+        # the URL).
+        #
+        # New flow: write the boot log URL onto the maestro node's artifacts
+        # below; send_kcidb picks it up via artifacts.test_log (which it
+        # walks the parent chain for, send_kcidb.py:443-455) and emits the
+        # single, dashboard-visible row.
+        #
+        # The row-building code above is kept intentionally so the outcome
+        # derivation (_node_result_from_rows) keeps working and so we can
+        # re-enable dual submission cheaply if the maestro path regresses.
+        #
+        # try:
+        #     submit_tests(
+        #         self.kcidb_submit_url,
+        #         self.kcidb_jwt,
+        #         self.kcidb_origin,
+        #         build_id,
+        #         test_rows,
+        #     )
+        # except urllib.error.URLError as e:
+        #     logger.error("KCIDB submit failed for node %s: %s", node_id, e)
+        #     return False, outcome
+        # ------------------------------------------------------------------
+
+        # Collect per-instance log URLs to write back onto the maestro node.
+        # send_kcidb only consumes the canonical `test_log` key (or
+        # `lava_log`, which isn't ours), so use that for the first URL;
+        # extra URLs from multi-VM jobs are preserved under suffixed keys
+        # so they aren't lost — they just won't show up as `log_url` on
+        # KCIDB until we move to per-instance child nodes.
+        log_urls = [r["log_url"] for r in test_rows if r.get("log_url")]
+        if log_urls:
+            outcome.artifacts = {"test_log": log_urls[0]}
+            for i, url in enumerate(log_urls[1:], start=1):
+                outcome.artifacts[f"test_log_{i}"] = url
+            logger.info(
+                "Attaching %d log URL(s) to node %s artifacts (test_log=%s)",
+                len(log_urls), node_id, log_urls[0],
             )
-        except urllib.error.URLError as e:
-            logger.error("KCIDB submit failed for node %s: %s", node_id, e)
-            return False, outcome
-        logger.info("Submitted %d test row(s) for node %s", len(test_rows), node_id)
+        else:
+            logger.info(
+                "No log URLs to attach for node %s (test_rows=%d)",
+                node_id, len(test_rows),
+            )
         return True, outcome
 
     # -- Loop -----------------------------------------------------------
