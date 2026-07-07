@@ -5,6 +5,8 @@
 
 """Unit tests for pull_labs_translate."""
 
+import json
+
 import pytest
 
 from kernel_ci_cloud_labs.pull_labs_translate import (
@@ -73,6 +75,10 @@ class TestTranslateJobHappyPath:
         vm = out["test_config"]["vms"][0]
         assert vm["instance_type"] == DEFAULT_PLATFORM_MAP["x86_64"]["instance_type"]
 
+    def test_default_map_routes_ltp_to_own_vm_test(self):
+        assert DEFAULT_TEST_TYPE_MAP["ltp"] == "ltp"
+        assert DEFAULT_TEST_TYPE_MAP["baseline"] == "url-kernel-boot"
+
     def test_test_types_map_to_vm_test_dirs(self):
         jobdef = _job(tests=[
             {"id": "ltp-syscalls", "type": "ltp"},
@@ -81,11 +87,38 @@ class TestTranslateJobHappyPath:
         ])
         out = translate_job(jobdef, BASE_CONFIG, node_id="n1")
         vm = out["test_config"]["vms"][0]
-        # All three map (via default fallback) to url-kernel-boot; dedup
-        assert vm["test"] == ["url-kernel-boot"]
+        # ltp has its own vm-test; baseline and unknown types fall back to
+        # url-kernel-boot and are deduplicated
+        assert vm["test"] == ["ltp", "url-kernel-boot"]
         assert "PULL_LABS_TESTS" in vm["test_params"]
         assert "ltp-syscalls:ltp" in vm["test_params"]["PULL_LABS_TESTS"]
         assert "baseline-x86:baseline" in vm["test_params"]["PULL_LABS_TESTS"]
+
+    def test_tests_json_carries_parameters(self):
+        jobdef = _job(tests=[
+            {
+                "id": "ltp-smoketest",
+                "type": "ltp",
+                "timeout_s": 3600,
+                "parameters": "tst_cmdfiles=smoketest skip_install=true",
+            },
+            {"id": "baseline-x86", "type": "baseline"},
+        ])
+        out = translate_job(jobdef, BASE_CONFIG, node_id="n1")
+        tests = json.loads(out["test_config"]["vms"][0]["test_params"]["PULL_LABS_TESTS_JSON"])
+        assert tests[0] == {
+            "id": "ltp-smoketest",
+            "type": "ltp",
+            "parameters": "tst_cmdfiles=smoketest skip_install=true",
+            "timeout_s": 3600,
+        }
+        assert tests[1]["id"] == "baseline-x86"
+        assert tests[1]["parameters"] == ""
+        assert tests[1]["timeout_s"] is None
+
+    def test_no_tests_json_without_tests(self):
+        out = translate_job(_job(tests=[]), BASE_CONFIG)
+        assert "PULL_LABS_TESTS_JSON" not in out["test_config"]["vms"][0]["test_params"]
 
     def test_rootfs_artifact_passed_through(self):
         jobdef = _job(extra_artifacts={"rootfs": "https://x/rootfs.bin"})
