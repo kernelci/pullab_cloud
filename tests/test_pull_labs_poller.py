@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Copyright (C) 2026 Collabora Limited
+# pylint: disable=protected-access
 # Author: Denys Fedoryshchenko <denys.f@collabora.com>
 
 """Unit tests for pull_labs_poller (no network, no AWS)."""

@@ -45,6 +45,9 @@ setup(
             "isort>=5.0",
             "pre-commit>=2.0",
             "pytest-cov>=2.0",
+            "pandas>=1.3.0",
+            "matplotlib>=3.4.0",
+            "seaborn>=0.11.0",
         ],
         "analysis": [
             "pandas>=1.3.0",
