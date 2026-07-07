@@ -8,7 +8,6 @@
 import json
 import logging
 import os
-import tempfile
 import urllib.error
 from unittest.mock import patch
 
@@ -626,14 +625,16 @@ class TestProcessEventNodeResult:
     def _run(self, poller, event, translate=None):
         translate = translate or {"return_value": {}}
         captured = {}
-        with patch.object(poller, "_claim_node", return_value=True), \
-             patch.object(
-                 poller, "_finish_node",
-                 side_effect=lambda nid, outcome: captured.update(outcome=outcome),
-             ), \
-             patch(_GET, return_value={"artifacts": {}}), \
-             patch("kernel_ci_cloud_labs.pull_labs_poller.translate_job", **translate), \
-             patch("kernel_ci_cloud_labs.pull_labs_poller.submit_tests", return_value={}):
+        with (
+            patch.object(poller, "_claim_node", return_value=True),
+            patch.object(
+                poller, "_finish_node",
+                side_effect=lambda nid, outcome: captured.update(outcome=outcome),
+            ),
+            patch(_GET, return_value={"artifacts": {}}),
+            patch("kernel_ci_cloud_labs.pull_labs_poller.translate_job",
+                  **translate),
+        ):
             poller.process_event(event)
         return captured["outcome"]
 
@@ -682,9 +683,10 @@ class TestProcessEventNodeResult:
         assert "missing artifacts.kernel" in outcome.error_msg
 
     def test_per_instance_rows_carry_log_url_and_stable_test_id(self):
-        """When executor returns per-instance rows with log_url, the submitted
-        KCIDB rows must each carry that URL and a test_id derived from the
-        instance_id (not the positional index)."""
+        """When executor returns per-instance rows with log_url, the node
+        outcome must carry those URLs in artifacts.test_log (first URL) and
+        test_log_N (subsequent URLs), and the node result must reflect the
+        aggregated per-instance statuses."""
         per_test = [
             {"name": "boot", "status": "PASS", "instance_id": "i-aaaa1111",
              "log_url": "https://b.s3.eu-west-1.amazonaws.com/a.log"},
@@ -695,31 +697,15 @@ class TestProcessEventNodeResult:
             _minimal_kc(),
             job_executor=lambda cfg: (per_test, None),
         )
-        seen = {}
-        with patch.object(p, "_claim_node", return_value=True), \
-             patch.object(p, "_finish_node"), \
-             patch(_GET, return_value={"artifacts": {}}), \
-             patch("kernel_ci_cloud_labs.pull_labs_poller.translate_job",
-                   return_value={}), \
-             patch(
-                "kernel_ci_cloud_labs.pull_labs_poller.submit_tests",
-                side_effect=lambda url, jwt, origin, build_id, rows: seen.update(rows=rows),
-             ):
-            p.process_event(_job_event(node_id="ndX"))
+        outcome = self._run(p, _job_event(node_id="ndX"))
 
-        rows = seen["rows"]
-        assert len(rows) == 2
-        by_id = {r["id"]: r for r in rows}
-        # test_id derived from instance_id => stable across retries.
-        assert set(by_id) == {"pullab_cloud_aws:ndX.i-aaaa1111", "pullab_cloud_aws:ndX.i-bbbb2222"}
-        # Per-row log_url survives the build_test_row pass-through.
-        assert by_id["pullab_cloud_aws:ndX.i-aaaa1111"]["log_url"] == \
+        # One FAIL among results -> overall node result is "fail".
+        assert outcome.result == "fail"
+        # Log URLs are attached to the outcome artifacts for send_kcidb.
+        assert outcome.artifacts["test_log"] == \
             "https://b.s3.eu-west-1.amazonaws.com/a.log"
-        assert by_id["pullab_cloud_aws:ndX.i-bbbb2222"]["log_url"] == \
+        assert outcome.artifacts["test_log_1"] == \
             "https://b.s3.eu-west-1.amazonaws.com/b.log"
-        # instance_id surfaces in misc for traceability.
-        assert by_id["pullab_cloud_aws:ndX.i-aaaa1111"]["misc"]["instance_id"] == "i-aaaa1111"
-        # Aggregated node outcome from per-instance statuses.
         # (one fail among two -> fail; verified indirectly via existing tests).
 
 

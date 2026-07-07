@@ -9,7 +9,6 @@ import pytest
 
 from kernel_ci_cloud_labs.pull_labs_translate import (
     DEFAULT_PLATFORM_MAP,
-    DEFAULT_TEST_TYPE_MAP,
     translate_job,
 )
 

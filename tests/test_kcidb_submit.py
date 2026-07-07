@@ -187,8 +187,10 @@ class TestSubmitRevision:
         class FakeResp:
             def __enter__(self):
                 return self
+
             def __exit__(self, *a):
                 return False
+
             def read(self):
                 return b'{"status":"ok","id":"sub-1"}'
 

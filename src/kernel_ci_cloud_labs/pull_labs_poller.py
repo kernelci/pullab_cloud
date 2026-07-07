@@ -45,7 +45,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from kernel_ci_cloud_labs.kcidb_submit import (
     build_test_row,
-    submit_tests,
     to_kcidb_status,
 )
 from kernel_ci_cloud_labs.pull_labs_translate import translate_job
