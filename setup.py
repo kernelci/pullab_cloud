@@ -25,6 +25,7 @@ setup(
     version="1.0.0",
     description="Kernel-ci-cloud-labs",
     long_description=long_description,
+    long_description_content_type="text/markdown",
     package_dir={"": "src"},
     packages=find_packages(where="src"),
     python_requires=">=3.11",
