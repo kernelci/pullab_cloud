@@ -1,0 +1,7 @@
+# Packages required to build and run kvm-unit-tests.
+# QEMU is installed separately by install_qemu() in common_lib.sh because the
+# package name varies across distros/versions.
+git
+gcc
+make
+binutils

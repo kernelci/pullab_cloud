@@ -60,3 +60,11 @@ analysis/data/
 # Distribution archives
 share/
 test-nested.json
+
+# kvm-unit-tests run artifacts (SSM logs + fetched sources; not source)
+vm-tests/*/ssm-output
+vm-tests/*/ssm-output-*/
+vm-tests/kvm-unit-tests/kvm-unit-tests/
+vm-tests/kvm-unit-tests/kernel_version_before.txt
+vm-tests/kvm-unit-tests/kvm-unit-tests.log
+vm-tests/kvm-unit-tests/results_kvm-unit-tests.*
