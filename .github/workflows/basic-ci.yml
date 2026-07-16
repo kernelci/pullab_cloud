@@ -2,9 +2,9 @@ name: Basic CI
 
 on:
   push:
-    branches: [ mainline ]
+    branches: [ main ]
   pull_request:
-    branches: [ mainline ]
+    branches: [ main ]
 
 permissions:
   contents: read
