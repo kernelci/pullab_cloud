@@ -1,4 +1,5 @@
 """Unit tests for AWS Role Manager"""
+# pylint: disable=protected-access
 
 __authors__ = ["Max Hubmann <mxhbm@amazon.de>", "Norbert Manthey <nmanthey@amazon.de>"]
 __copyright__ = "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved."

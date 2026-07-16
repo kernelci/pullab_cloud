@@ -200,7 +200,7 @@ def _check_bucket_policy_statement(s3, bucket_name: str, fix: bool) -> bool:
             print(f"✗ Could not read bucket policy ({code}): {e}")
             return False
         existing = None
-    except (ValueError, json.JSONDecodeError) as e:
+    except ValueError as e:
         print(f"✗ Bucket policy is not valid JSON: {e}")
         return False
 
@@ -365,7 +365,7 @@ def check_kcidb_jwt() -> bool:
         # JWT payload is base64url; pad to a multiple of 4 before decoding.
         payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
         payload = json.loads(base64.urlsafe_b64decode(payload_b64))
-    except (ValueError, json.JSONDecodeError) as e:
+    except ValueError as e:
         print(f"✗ JWT payload not decodable: {e}")
         return False
 

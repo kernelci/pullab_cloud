@@ -262,5 +262,3 @@ def collect_run_artifacts(
         manifest_path,
     )
     return manifest
-
-

@@ -187,8 +187,10 @@ class TestSubmitRevision:
         class FakeResp:
             def __enter__(self):
                 return self
+
             def __exit__(self, *a):
                 return False
+
             def read(self):
                 return b'{"status":"ok","id":"sub-1"}'
 
@@ -237,7 +239,7 @@ class TestSubmitTestsWrapper:
             def __exit__(self, *a): return False
             def read(self): return b'{}'
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None):  # pylint: disable=unused-argument
             captured["body"] = json.loads(req.data.decode("utf-8"))
             return FakeResp()
 
@@ -264,7 +266,7 @@ class TestSubmitTestsWrapper:
             def __exit__(self, *a): return False
             def read(self): return b'{}'
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None):  # pylint: disable=unused-argument
             captured["body"] = json.loads(req.data.decode("utf-8"))
             return FakeResp()
 

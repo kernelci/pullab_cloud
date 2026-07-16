@@ -292,8 +292,11 @@ def main():
     val_parser.add_argument("--bucket", help="S3 bucket to verify (and create with --fix)")
     val_parser.add_argument("--role", help="IAM role name used by VM instance profiles")
     val_parser.add_argument("--region", default="us-west-2", help="AWS region (default: us-west-2)")
-    val_parser.add_argument("--api-url", help=f"KernelCI API base URI (overrides $KERNELCI_API_BASE_URI)")
-    val_parser.add_argument("--fix", action="store_true", help="Create missing resources (S3 bucket) instead of just reporting them")
+    val_parser.add_argument("--api-url", help="KernelCI API base URI (overrides $KERNELCI_API_BASE_URI)")
+    val_parser.add_argument(
+        "--fix", action="store_true",
+        help="Create missing resources (S3 bucket) instead of just reporting them",
+    )
     val_parser.set_defaults(func=cmd_setup_validate)
 
     args = parser.parse_args()
