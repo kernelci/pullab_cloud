@@ -25,6 +25,7 @@ setup(
     version="1.0.0",
     description="Kernel-ci-cloud-labs",
     long_description=long_description,
+    long_description_content_type="text/markdown",
     package_dir={"": "src"},
     packages=find_packages(where="src"),
     python_requires=">=3.11",
@@ -45,6 +46,9 @@ setup(
             "isort>=5.0",
             "pre-commit>=2.0",
             "pytest-cov>=2.0",
+            "pandas>=1.3.0",
+            "matplotlib>=3.4.0",
+            "seaborn>=0.11.0",
         ],
         "analysis": [
             "pandas>=1.3.0",

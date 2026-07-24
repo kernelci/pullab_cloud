@@ -29,7 +29,7 @@ jobs:
 
     - name: Get base branch coverage
       run: |
-        git checkout origin/mainline
+        git checkout origin/main
         pip install -e ".[dev]"
         python -m pytest tests/ -m "not integration" --cov=src --cov-report=json:coverage-base.json --tb=no -q || true
         BASE_COVERAGE=$(python -c "import json; print(json.load(open('coverage-base.json'))['totals']['percent_covered'])")

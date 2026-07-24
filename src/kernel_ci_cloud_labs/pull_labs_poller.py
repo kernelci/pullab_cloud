@@ -45,7 +45,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from kernel_ci_cloud_labs.kcidb_submit import (
     build_test_row,
-    submit_tests,
     to_kcidb_status,
 )
 from kernel_ci_cloud_labs.pull_labs_translate import translate_job
@@ -314,7 +313,7 @@ def _validate_default_executor_deps() -> None:
 
     problems: List[str] = []
     try:
-        import boto3  # noqa: F401,PLC0415
+        import boto3  # noqa: F401,PLC0415  # pylint: disable=unused-import
     except ImportError as e:
         problems.append(
             f"boto3 import failed ({e}) — run: python3.11 -m pip install -e ."
