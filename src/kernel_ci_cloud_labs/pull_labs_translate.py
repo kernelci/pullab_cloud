@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 # argument of translate_job() to customise per-deployment.
 DEFAULT_PLATFORM_MAP: Dict[str, Dict[str, str]] = {
     "x86_64": {
-        "instance_type": "c5a.4xlarge",
+        "instance_type": "c8i.4xlarge",
         "ami_id": "resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64",
     },
     "arm64": {
