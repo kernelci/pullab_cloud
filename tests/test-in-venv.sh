@@ -14,18 +14,27 @@
 set -e
 
 # Configuration
+# PYTHON selects the interpreter used to create the virtual environment.
+# Override it to build the venv with a specific version, e.g.
+#   PYTHON=python3.12 tests/test-in-venv.sh
+# It may be a name on PATH or an absolute path. All pip/pytest calls go through
+# "<python> -m ..." (never the bare pip/python3 shims).
+PYTHON="${PYTHON:-python3}"
 VENV_DIR=".venv-testing"
 MODULE_DIR="$(dirname "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")"
 STATUS_CACHE="$MODULE_DIR/$VENV_DIR/.git_status_cache"
+# Interpreter inside the venv (created from $PYTHON). Used for pip/pytest so the
+# correct environment is targeted regardless of which binary bootstrapped it.
+VENV_PYTHON="$MODULE_DIR/$VENV_DIR/bin/python"
 
 # Function to create and setup virtual environment
 setup_virtual_environment()
 {
-    echo "Setting up virtual environment..."
-    python3 -m venv "${VENV_DIR}"
+    echo "Setting up virtual environment with '${PYTHON}'..."
+    "${PYTHON}" -m venv "${VENV_DIR}"
     source "${VENV_DIR}/bin/activate"
-    pip install --upgrade pip
-    pip install -e ".[dev]"
+    "${VENV_PYTHON}" -m pip install --upgrade pip
+    "${VENV_PYTHON}" -m pip install -e ".[dev]"
 }
 
 # Function to activate virtual environment
@@ -40,7 +49,7 @@ install_module()
 {
     echo "Installing module..." 1>&2
     status=0
-    output=$(pip install -e "${MODULE_DIR}" 2>&1) || status=$?
+    output=$("${VENV_PYTHON}" -m pip install -e "${MODULE_DIR}" 2>&1) || status=$?
     if [ $status -ne 0 ]; then
         echo "Installation failed, with output:" 1>&2
         echo "$output" 1>&2
@@ -53,7 +62,7 @@ run_tests()
 {
     echo "Running unit tests..." 1>&2
     status=0
-    output=$(python3 -m pytest tests/ -v -m "not integration" 2>&1) || status=$?
+    output=$("${VENV_PYTHON}" -m pytest tests/ -v -m "not integration" 2>&1) || status=$?
     if [ $status -eq 0 ]; then
         echo "Unit tests passed" 1>&2
     else
