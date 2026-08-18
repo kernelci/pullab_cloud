@@ -172,7 +172,15 @@ install_kernel_rpm()
     echo "kernel before installation: $(uname -r)"
     echo "Installing kernel from $kernel_rpm (arch: $rpm_arch)"
 
-    if sudo yum localinstall -y "$kernel_rpm" 2>/dev/null || sudo dnf install -y "$kernel_rpm" 2>/dev/null; then
+    # Install the kernel RPM. On an AMI whose default kernel is a different
+    # series (e.g. a 6.18 AMI when installing a 6.1 kernel), the distro
+    # kernel<N>-tools package declares "conflicts with kernel-uname-r < <N>",
+    # so a plain install is refused. Fall back to --allowerasing, which
+    # removes the conflicting tools package and installs the requested kernel
+    # (both vmlinuz files remain in /boot, so the target kernel can be booted).
+    if sudo dnf install -y "$kernel_rpm" 2>/dev/null \
+        || sudo yum localinstall -y "$kernel_rpm" 2>/dev/null \
+        || sudo dnf install -y --allowerasing "$kernel_rpm" 2>/dev/null; then
         dump_boot_info
         local installed_version
         installed_version=$(rpm -qp --queryformat '%{VERSION}' "$kernel_rpm" 2>/dev/null)
