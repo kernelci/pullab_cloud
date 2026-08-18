@@ -311,7 +311,10 @@ class AWSProvider(BaseProvider):
           finishes the kernelci-api node incomplete/Infrastructure with the
           matched line surfaced in error_msg.
         * No new VM console output for PULLAB_TASK_HANG_THRESHOLD_SEC seconds
-          (default 600) -- silent stall, same treatment as a crash.
+          (default 1200) -- silent stall, same treatment as a crash. The
+          default accommodates CPU-heavy benchmarks (e.g. UnixBench) whose
+          console goes quiet for many minutes during a run; lower it via the
+          env var for faster hang detection on lighter workloads.
         * Overall PULLAB_TASK_WAIT_TIMEOUT_SEC seconds elapsed (default 3600)
           -- final safety net for whatever isn't covered above.
 
@@ -331,7 +334,7 @@ class AWSProvider(BaseProvider):
 
         poll_interval = float(os.getenv("PULLAB_TASK_POLL_INTERVAL_SEC") or 30)
         log_interval = float(os.getenv("PULLAB_TASK_PROGRESS_LOG_SEC") or 120)
-        hang_threshold = float(os.getenv("PULLAB_TASK_HANG_THRESHOLD_SEC") or 600)
+        hang_threshold = float(os.getenv("PULLAB_TASK_HANG_THRESHOLD_SEC") or 1200)
         overall_timeout = float(os.getenv("PULLAB_TASK_WAIT_TIMEOUT_SEC") or 3600)
 
         start = time.time()
