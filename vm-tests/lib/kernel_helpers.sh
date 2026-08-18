@@ -219,12 +219,18 @@ install_kernel_rpm()
                     sudo grubby --add-kernel="$vmlinuz" \
                         --initrd="$initrd" \
                         --title="Linux $kver" \
+                        --args="fips=0" \
                         --copy-default \
                         --make-default
+                    # --copy-default may carry over fips=1 from the AMI's default
+                    # entry; drop it so fips=0 actually wins (unsigned modules on
+                    # a custom kernel panic under FIPS).
+                    sudo grubby --update-kernel="$vmlinuz" --remove-args="fips=1" 2>/dev/null || true
                     echo "Added and set default: $vmlinuz"
                 else
                     echo "WARNING: No initramfs for $kver, trying set-default anyway"
                     sudo grubby --set-default="$vmlinuz" || true
+                    sudo grubby --update-kernel="$vmlinuz" --args="fips=0" --remove-args="fips=1" 2>/dev/null || true
                 fi
                 grub_kernel="$vmlinuz"
             else
@@ -233,12 +239,28 @@ install_kernel_rpm()
         else
             echo "Setting default boot kernel to $grub_kernel"
             sudo grubby --set-default="$grub_kernel"
+            # The RPM install auto-created this boot entry, so the fips=0 arg
+            # from the --add-kernel path above was never applied to it. A custom
+            # kernel built with 'make binrpm-pkg' has unsigned modules that
+            # panic under FIPS ("Module ... signature verification failed in
+            # FIPS mode"), so force fips=0 (and drop any fips=1) on this entry.
+            sudo grubby --update-kernel="$grub_kernel" --args="fips=0" 2>/dev/null || true
+            sudo grubby --update-kernel="$grub_kernel" --remove-args="fips=1" 2>/dev/null || true
         fi
 
         if [ -n "$grub_kernel" ]; then
             echo "Verifying default kernel:"
             sudo grubby --default-kernel
         fi
+
+        # Disable FIPS mode system-wide before rebooting into a custom kernel.
+        # Some AL2023 enable FIPS; unsigned modules (from make binrpm-pkg)
+        # fail signature verification and cause a kernel panic.
+        if command -v fips-mode-setup &>/dev/null; then
+            echo "Disabling FIPS mode for custom kernel boot"
+            sudo fips-mode-setup --disable 2>/dev/null || true
+        fi
+
         return 0
     else
         echo "ERROR: Failed to install new kernel" >&2
