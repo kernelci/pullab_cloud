@@ -176,11 +176,14 @@ install_kernel_rpm()
         dump_boot_info
         local installed_version
         installed_version=$(rpm -qp --queryformat '%{VERSION}' "$kernel_rpm" 2>/dev/null)
+        # RPM VERSION may use underscores (e.g. 6.18.41_nogup) while the kernel
+        # LOCALVERSION uses dashes (vmlinuz-6.18.41-nogup). Try both variants.
+        local installed_version_alt="${installed_version//_/-}"
 
         local grub_kernel
         grub_kernel=$(sudo grubby --info=ALL 2>/dev/null \
             | grep "^kernel=" \
-            | grep "$installed_version" \
+            | grep -E "$installed_version|$installed_version_alt" \
             | head -1 \
             | sed 's/^kernel=//' \
             | tr -d '"' \
@@ -189,24 +192,29 @@ install_kernel_rpm()
         if [ -z "$grub_kernel" ]; then
             local vmlinuz
             vmlinuz=$(ls /boot/vmlinuz-*"$installed_version"* 2>/dev/null | head -1)
+            if [ -z "$vmlinuz" ] && [ "$installed_version_alt" != "$installed_version" ]; then
+                vmlinuz=$(ls /boot/vmlinuz-*"$installed_version_alt"* 2>/dev/null | head -1)
+            fi
             if [ -n "$vmlinuz" ]; then
                 echo "Adding grubby entry for $vmlinuz"
-                local initrd="/boot/initramfs-${installed_version}.img"
+                # Derive the kernel version from the vmlinuz filename
+                local kver="${vmlinuz#/boot/vmlinuz-}"
+                local initrd="/boot/initramfs-${kver}.img"
                 if [ ! -f "$initrd" ]; then
-                    echo "Generating initramfs at $initrd for kernel $installed_version"
-                    sudo dracut --force "$initrd" "$installed_version" 2>/dev/null \
-                        || sudo mkinitrd "$initrd" "$installed_version" 2>/dev/null \
+                    echo "Generating initramfs at $initrd for kernel $kver"
+                    sudo dracut --force "$initrd" "$kver" 2>/dev/null \
+                        || sudo mkinitrd "$initrd" "$kver" 2>/dev/null \
                         || true
                 fi
                 if [ -f "$initrd" ]; then
                     sudo grubby --add-kernel="$vmlinuz" \
                         --initrd="$initrd" \
-                        --title="Linux $installed_version" \
+                        --title="Linux $kver" \
                         --copy-default \
                         --make-default
                     echo "Added and set default: $vmlinuz"
                 else
-                    echo "WARNING: No initramfs for $installed_version, trying set-default anyway"
+                    echo "WARNING: No initramfs for $kver, trying set-default anyway"
                     sudo grubby --set-default="$vmlinuz" || true
                 fi
                 grub_kernel="$vmlinuz"
