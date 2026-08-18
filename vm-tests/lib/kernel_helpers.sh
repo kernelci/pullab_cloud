@@ -210,6 +210,7 @@ install_kernel_rpm()
                     sudo grubby --add-kernel="$vmlinuz" \
                         --initrd="$initrd" \
                         --title="Linux $kver" \
+                        --args="fips=0" \
                         --copy-default \
                         --make-default
                     echo "Added and set default: $vmlinuz"
@@ -230,6 +231,15 @@ install_kernel_rpm()
             echo "Verifying default kernel:"
             sudo grubby --default-kernel
         fi
+
+        # Disable FIPS mode system-wide before rebooting into a custom kernel.
+        # Some AL2023 enable FIPS; unsigned modules (from make binrpm-pkg)
+        # fail signature verification and cause a kernel panic.
+        if command -v fips-mode-setup &>/dev/null; then
+            echo "Disabling FIPS mode for custom kernel boot"
+            sudo fips-mode-setup --disable 2>/dev/null || true
+        fi
+
         return 0
     else
         echo "ERROR: Failed to install new kernel" >&2
