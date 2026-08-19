@@ -193,3 +193,29 @@ class TestTaskDefinitionManager:
         assert container_def["logConfiguration"]["logDriver"] == "awslogs"
         # Log group defaults to /ecs/{family} if not explicitly set
         assert "/ecs/" in container_def["logConfiguration"]["options"]["awslogs-group"]
+        # Stream prefix defaults to "ecs" when not configured
+        assert container_def["logConfiguration"]["options"]["awslogs-stream-prefix"] == "ecs"
+
+    def test_task_definition_custom_log_stream_prefix(self):
+        """A configured log_stream_prefix is used for the awslogs stream prefix,
+        so concurrent runs are separable in the shared /ecs/<family> group."""
+        mock_client = Mock()
+        mock_client.describe_task_definition.side_effect = Exception("Not found")
+        mock_client.register_task_definition.return_value = {
+            "taskDefinition": {"taskDefinitionArn": "arn:aws:ecs:us-west-2:123:task-definition/test:1"}
+        }
+
+        config = {
+            "family": "test-task",
+            "container_name": "test-container",
+            "log_stream_prefix": "gccupdate",
+        }
+
+        manager = AWSTaskDefinitionManager(mock_client, {})
+        manager.ensure_exists("test-task", config)
+
+        container_def = mock_client.register_task_definition.call_args[1]["containerDefinitions"][0]
+        assert (
+            container_def["logConfiguration"]["options"]["awslogs-stream-prefix"]
+            == "gccupdate"
+        )

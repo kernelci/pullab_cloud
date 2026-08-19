@@ -285,6 +285,15 @@ class AWSAuth(BaseAuth):
                 first_role_arn = next(iter(role_arns.values()), None)
                 task_config["execution_role_arn"] = first_role_arn
                 task_config["task_role_arn"] = first_role_arn
+
+                # Derive a per-run awslogs stream prefix so concurrent runs are
+                # distinguishable in the shared /ecs/<family> log group. Prefer
+                # an explicit config value, else the run's test_id, else "ecs".
+                if "log_stream_prefix" not in task_config:
+                    test_id = (self.config.get("test_config") or {}).get("test_id")
+                    if test_id:
+                        task_config["log_stream_prefix"] = test_id
+
                 logger.debug("Task definition family: %s", task_config.get("family"))
                 logger.debug("Execution role ARN: %s", task_config.get("execution_role_arn"))
 
