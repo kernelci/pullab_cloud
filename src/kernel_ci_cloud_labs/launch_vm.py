@@ -819,15 +819,26 @@ def launch_vms_from_config():
 
     # Function to launch and test a single VM instance
     def launch_and_test_vm(vm_config, instance_num, results_list):
-        """Launch one VM instance, execute test, and verify results from S3."""
+        """Launch one VM instance, execute test, and verify results from S3.
+
+        Any failure here is contained to this one VM: it is recorded as a
+        failed entry in results_list and never propagates out of the thread,
+        so one VM's spawn/command/setup error cannot abort the whole run.
+        """
         # Merge shared config with VM-specific config
         full_vm_config = {**shared_config, **vm_config}
         vm_name = f"{vm_config.get('instance_type', 'vm')}-{vm_config.get('test', 'test')}-{instance_num}"
 
         log_not(f"\n=== Launching VM: {vm_name} ===")
-        launcher = VMLauncher(full_vm_config)
+        launcher = None
 
         try:
+            # Construct inside the try: VMLauncher.__init__ resolves the AMI
+            # via SSM and creates boto3 clients, which can throw (throttle,
+            # bad config). A failure here must be a failed VM, not an
+            # unhandled thread death that leaves the VM reported as "missing".
+            launcher = VMLauncher(full_vm_config)
+
             if not launcher.prepare_test_artifacts():
                 log_error(f"FAILED: {vm_name} - Could not prepare test artifacts")
                 results_list.append({"vm_name": vm_name, "success": False})
@@ -858,18 +869,21 @@ def launch_vms_from_config():
                 log_error(f"FAILED: {vm_name} - Test did not complete successfully")
                 results_list.append({"vm_name": vm_name, "success": False})
 
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            # Contain any per-VM error (including VMLauncher construction /
+            # SSM AMI resolution) so it counts as one failed VM.
             log_exception(f"FAILED: {vm_name}", e)
             results_list.append({"vm_name": vm_name, "success": False})
         finally:
             # cleanup() is already internally guarded per-stage, but a thread
             # that escapes its target with an unhandled exception is silent
             # by default — wrap once more so any surviving error reaches
-            # the container log with a traceback.
-            try:
-                launcher.cleanup()
-            except Exception as e:
-                log_exception(f"cleanup raised for {vm_name}", e)
+            # the container log with a traceback. Skip if construction failed.
+            if launcher is not None:
+                try:
+                    launcher.cleanup()
+                except Exception as e:  # pylint: disable=broad-exception-caught
+                    log_exception(f"cleanup raised for {vm_name}", e)
 
     # Launch all VMs in parallel using threads
     threads = []
