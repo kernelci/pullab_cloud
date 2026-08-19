@@ -8,6 +8,7 @@ __copyright__ = "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserv
 import base64
 import json
 import os
+import random
 import shlex
 import sys
 import threading
@@ -17,6 +18,7 @@ import uuid
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 from kernel_ci_cloud_labs.core.log_scrub import scrub_text
 
@@ -74,6 +76,57 @@ def log_exception(prefix, exc):
     sys.stderr.write(f"ERROR: {prefix}: {exc!r}\n")
     sys.stderr.write(traceback.format_exc())
     sys.stderr.flush()
+
+
+# AWS error codes that indicate a transient, retryable throttle/capacity
+# condition rather than a permanent failure. When many VMs are spawned at
+# once (min_count * tests), or several pipeline runs execute concurrently,
+# EC2 RunInstances and SSM SendCommand can return these; a bounded retry with
+# exponential backoff + jitter smooths the burst out.
+_RETRYABLE_ERROR_CODES = frozenset(
+    {
+        "RequestLimitExceeded",
+        "Throttling",
+        "ThrottlingException",
+        "ThrottledException",
+        "TooManyRequestsException",
+        "RequestThrottled",
+        "InsufficientInstanceCapacity",
+        "Unavailable",
+        "ServiceUnavailable",
+        "InternalError",
+        "InternalFailure",
+    }
+)
+
+
+def _call_with_retries(func, *args, description="AWS call", max_attempts=6, base_delay=2.0, **kwargs):
+    """Call a boto3 operation, retrying transient throttle/capacity errors.
+
+    boto3's adaptive retry mode already handles some throttling, but bursty
+    RunInstances/SendCommand storms (many VMs, or parallel runs) can still
+    surface RequestLimitExceeded/InsufficientInstanceCapacity to the caller.
+    This adds an application-level bounded retry with exponential backoff and
+    full jitter so a single throttled call doesn't fail an otherwise healthy
+    VM. Non-retryable ClientErrors are re-raised immediately.
+    """
+    attempt = 0
+    while True:
+        try:
+            return func(*args, **kwargs)
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            attempt += 1
+            if code not in _RETRYABLE_ERROR_CODES or attempt >= max_attempts:
+                raise
+            # Exponential backoff with full jitter, capped at 30s.
+            delay = min(base_delay * (2 ** (attempt - 1)), 30.0)
+            delay = random.uniform(0, delay)  # nosec B311 - jitter, not crypto
+            log_not(
+                f"{description}: transient error {code} "
+                f"(attempt {attempt}/{max_attempts}), retrying in {delay:.1f}s"
+            )
+            time.sleep(delay)
 
 
 # Kernel-side fatal/near-fatal markers we scan captured console buffers for.
@@ -255,7 +308,9 @@ echo "✓ SSM agent is ready"
         params["IamInstanceProfile"] = {"Name": self.role_name}
 
         log_not("Calling run_instances...")
-        response = self.ec2.run_instances(**params)
+        response = _call_with_retries(
+            self.ec2.run_instances, description="run_instances", **params
+        )
 
         if not response.get("Instances"):
             log_error("Failed to launch instance")
@@ -321,7 +376,9 @@ chmod +x /tmp/test-vm-client.sh
 /tmp/test-vm-client.sh {self.s3_bucket} {self.run_prefix} {self.test} {self.max_runtime}
 """
 
-        response = self.ssm.send_command(
+        response = _call_with_retries(
+            self.ssm.send_command,
+            description="ssm.send_command",
             InstanceIds=[self.instance_id],
             DocumentName="AWS-RunShellScript",
             Parameters={
@@ -818,6 +875,13 @@ def launch_vms_from_config():
     threads = []
     results = []
 
+    # Small stagger between thread starts so the initial RunInstances /
+    # SendCommand burst is spread over time instead of hitting the EC2/SSM
+    # APIs all in the same instant (which triggers RequestLimitExceeded,
+    # especially when several pipeline runs execute concurrently).
+    # Override via PULLAB_VM_SPAWN_STAGGER_SEC; 0 disables it.
+    spawn_stagger = float(os.getenv("PULLAB_VM_SPAWN_STAGGER_SEC") or 1.0)
+
     for vm_config in expanded_vms:
         min_count = vm_config.get("min_count", 1)
         log_not(f"\n=== Queueing {min_count}x {vm_config.get('instance_type')} for test: {vm_config.get('test')} ===")
@@ -826,7 +890,9 @@ def launch_vms_from_config():
         for i in range(min_count):
             thread = threading.Thread(target=launch_and_test_vm, args=(vm_config, i + 1, results))
             threads.append(thread)
-            thread.start()  # Start immediately
+            thread.start()
+            if spawn_stagger > 0:
+                time.sleep(spawn_stagger)
 
     # Wait for all threads to complete
     log_not(f"\n=== Waiting for {len(threads)} VMs to complete ===")
