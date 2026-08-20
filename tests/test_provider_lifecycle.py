@@ -8,6 +8,7 @@ __copyright__ = "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserv
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import botocore.exceptions
 import pytest
 
 from kernel_ci_cloud_labs.providers.aws_provider import (
@@ -178,6 +179,30 @@ class TestAWSProviderWaitLoop:
             with pytest.raises(RuntimeError, match="no VM console output"):
                 p.wait_for_task_completion()
         mock_ecs.stop_task.assert_called_once()
+
+    def test_transient_log_error_does_not_trip_hang_timeout(self, monkeypatch):
+        # When log retrieval keeps failing (e.g. ExpiredTokenException while
+        # credentials refresh), the hang timer must NOT advance — the run
+        # should keep going and only stop on the overall timeout, not the
+        # (much smaller) hang threshold.
+        p, mock_ecs = self._make_provider(monkeypatch, env={
+            "PULLAB_TASK_POLL_INTERVAL_SEC": "0",
+            "PULLAB_TASK_HANG_THRESHOLD_SEC": "3",
+            "PULLAB_TASK_WAIT_TIMEOUT_SEC": "20",
+        })
+        cw_manager = Mock()
+        expired = botocore.exceptions.ClientError(
+            {"Error": {"Code": "ExpiredTokenException", "Message": "expired"}},
+            "FilterLogEvents",
+        )
+        cw_manager.get_logs_with_filter.side_effect = expired
+        with patch.object(p, "get_task_status", return_value={"status": "RUNNING", "containers": []}), \
+             patch.object(p, "_build_vm_log_manager", return_value=cw_manager):
+            # Must NOT raise the hang error (3s); must hit the overall timeout (20s).
+            with pytest.raises(RuntimeError, match="task wait timeout exceeded"):
+                p.wait_for_task_completion()
+        # The logs client was refreshed on the transient error.
+        assert mock_ecs.stop_task.called  # terminated on overall timeout
 
     def test_overall_timeout_terminates_and_raises(self, monkeypatch):
         # No log manager so the only abort path is the overall-timeout cap.
