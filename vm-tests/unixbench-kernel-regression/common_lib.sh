@@ -107,12 +107,10 @@ summarize_unixbench_log()
         # Clean up metric name
         gsub(/^\s+|\s+$/, "", metric)
 
-        # Determine more_is_better
-        if (metric ~ /System_Call_Overhead/) {
-            more_is_better = "false"
-        } else {
-            more_is_better = "true"
-        }
+        # All first-section UnixBench results are throughput rates (lps/lpm/KBps),
+        # so higher is better — including "System Call Overhead", whose value is
+        # syscall round-trips per second (lps), not a time. Do NOT invert it.
+        more_is_better = "true"
 
         printf "%s.%s,%s,%s,%s,%s,%s,%s,%s\n", benchmark_version, metric, unit, value, more_is_better, kernel_version, instance_id, instance_type, arch
     }
