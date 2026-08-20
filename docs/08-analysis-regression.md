@@ -23,7 +23,7 @@ Both engines read the same CSV schema emitted by the in-VM test harness. The hea
 metric,unit,value,more_is_better,kernel_version,instance_id,instance_type,arch
 ```
 
-(documented in `vm-tests/unixbench-kernel-regression/README.md`). `more_is_better` is computed per metric in the same awk block: every metric defaults to `"true"`; the **only** metric forced to `"false"` is `System_Call_Overhead` (a latency-style metric where larger is worse).
+(documented in `vm-tests/unixbench-kernel-regression/README.md`). `more_is_better` is computed per metric in the same awk block: every first-section UnixBench metric — including `System_Call_Overhead` — is `"true"`, because they are all throughput figures reported in loops/iterations per second (lps), where larger is faster. (`System_Call_Overhead` reads as "syscalls completed per fixed interval"; despite the name, a higher value is better.)
 
 The two CSV "sides" come from different run scripts:
 
