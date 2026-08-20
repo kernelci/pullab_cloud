@@ -14,7 +14,7 @@ SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SOURCE_DIR}/common_lib.sh"
 
 #Assert if kernel version has changed
-kernel_after="$(get_running_kernel)"
+kernel_after="$(get_running_kernel_id)"
 echo "Current running kernel: $kernel_after"
 
 kernel_before="$(load_kernel_version "$KERNEL_FILE")"
@@ -27,6 +27,6 @@ save_kernel_version "$kernel_after" "$KERNEL_FILE"
 RESULTS_DIR="${PWD}/${KERNEL_BENCH_DIR}/last_kernel"
 mkdir -p "$RESULTS_DIR"
 run_unixbench "$RESULTS_DIR"
-summarize_unixbench_log "$RESULTS_DIR"/unixbench.log "benchmark-tip-$(basename $kernel_after).csv"
+summarize_unixbench_log "$RESULTS_DIR"/unixbench.log "benchmark-tip-$(uname -r).csv"
 
 # Stop here, this is the last script, no more execution

@@ -36,6 +36,29 @@ get_running_kernel()
     uname -r
 }
 
+# A build-level fingerprint of the *running* kernel, used to detect that a
+# reboot actually switched kernels even when two builds share the same NVR
+# (uname -r).
+#
+# Combines:
+#   - uname -r  : release (NVR); distinguishes normal version bumps.
+#   - uname -v  : build version string, which embeds the build date/time and
+#                 so differs between two builds of the same NVR.
+#   - sha256 of the booted /boot/vmlinuz-<uname -r> as a strong fallback when
+#                 uname -v happens to match (or is unavailable).
+get_running_kernel_id()
+{
+    local rel ver img_hash="" vmlinuz
+    rel="$(uname -r)"
+    ver="$(uname -v)"
+    vmlinuz="/boot/vmlinuz-${rel}"
+    if [ -r "$vmlinuz" ] && command -v sha256sum >/dev/null 2>&1; then
+        img_hash="$(sha256sum "$vmlinuz" 2>/dev/null | awk '{print $1}')"
+    fi
+    # Single-line, stable identity string.
+    echo "${rel}|${ver}|${img_hash}"
+}
+
 save_kernel_version()
 {
     local version="$1"
@@ -62,10 +85,15 @@ assert_kernel_changed()
     local before="$1"
     local after="$2"
     if [ "$before" = "$after" ]; then
-        echo "ERROR: kernel version did not change (still $after)" >&2
+        echo "ERROR: kernel did not change after reboot (still: $after)" >&2
+        echo "       If the two kernels share a version-release (NVR) but differ" >&2
+        echo "       in build (e.g. compiler A/B), ensure run-01 force-reinstalls" >&2
+        echo "       the RPM and that get_running_kernel_id is used for before/after." >&2
         return 1
     fi
-    echo "Kernel version changed from $before to $after"
+    echo "Kernel changed after reboot:"
+    echo "  before: $before"
+    echo "  after:  $after"
 }
 
 # List available kernel RPMs from the shared S3 area.
@@ -181,15 +209,35 @@ install_kernel_rpm()
     echo "kernel before installation: $(uname -r)"
     echo "Installing kernel from $kernel_rpm (arch: $rpm_arch)"
 
-    # Install the kernel RPM. On an AMI whose default kernel is a different
-    # series (e.g. a 6.18 AMI when installing a 6.1 kernel), the distro
-    # kernel<N>-tools package declares "conflicts with kernel-uname-r < <N>",
-    # so a plain install is refused. Fall back to --allowerasing, which
-    # removes the conflicting tools package and installs the requested kernel
-    # (both vmlinuz files remain in /boot, so the target kernel can be booted).
-    if sudo dnf install -y "$kernel_rpm" 2>/dev/null \
-        || sudo yum localinstall -y "$kernel_rpm" 2>/dev/null \
-        || sudo dnf install -y --allowerasing "$kernel_rpm" 2>/dev/null; then
+    # Install the kernel RPM. Two wrinkles this must handle:
+    #
+    # 1. Same NVR, different build: compiler/optimization A/B kernels can share
+    #    the exact version-release string while carrying different
+    #    code/binaries. A plain "dnf install" of an already-present NVR is a
+    #    no-op ("Nothing to do"), which would leave the old build in place.
+    #    Detect that case and force a reinstall so the new vmlinuz/modules are
+    #    actually written.
+    # 2. Cross-series conflict: on an AMI whose default kernel is a different
+    #    series (e.g. a 6.18 AMI when installing a 6.1 kernel), the distro
+    #    kernel<N>-tools package conflicts with "kernel-uname-r < <N>", so a
+    #    plain install is refused; fall back to --allowerasing.
+    local rpm_nvr
+    rpm_nvr=$(rpm -qp --queryformat '%{NAME}-%{VERSION}-%{RELEASE}' "$kernel_rpm" 2>/dev/null)
+    local install_ok=1
+    if rpm -q "$rpm_nvr" >/dev/null 2>&1; then
+        # Same NVR already installed — force reinstall so a different build of
+        # the same version actually replaces the on-disk kernel image/modules.
+        echo "Package $rpm_nvr already installed; forcing reinstall (build may differ)"
+        sudo dnf reinstall -y "$kernel_rpm" 2>/dev/null \
+            || sudo rpm -Uvh --force "$kernel_rpm" 2>/dev/null \
+            || install_ok=0
+    else
+        sudo dnf install -y "$kernel_rpm" 2>/dev/null \
+            || sudo yum localinstall -y "$kernel_rpm" 2>/dev/null \
+            || sudo dnf install -y --allowerasing "$kernel_rpm" 2>/dev/null \
+            || install_ok=0
+    fi
+    if [ "$install_ok" -eq 1 ]; then
         dump_boot_info
         local installed_version
         installed_version=$(rpm -qp --queryformat '%{VERSION}' "$kernel_rpm" 2>/dev/null)
