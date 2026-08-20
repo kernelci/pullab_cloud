@@ -568,7 +568,7 @@ Test: unixbench-kernel-regression
       [t-test p=0.0000, U-test p=0.0001, Cohen's d=8.13]
 
 ------------------------------------------------------------
-Tests with benchmarks: 1 | Regressions found: 1
+Tests with benchmarks: 1 | Regressions found: 1 | Improvements found: 0
 Tests with regressions: unixbench-kernel-regression
 ============================================================
 ```
@@ -584,17 +584,20 @@ The `BenchmarkAnalyzer` returns a `PipelineBenchmarkSummary` dataclass with stru
 The `PipelineBenchmarkSummary` contains:
 - `test_results` — list of `TestBenchmarkResult`, one per test
 - `tests_with_regression` / `regression_test_names` — quick summary of which tests regressed
+- `tests_with_improvement` / `improvement_test_names` — quick summary of which tests improved
 
 Each `TestBenchmarkResult` contains:
 - `base_kernel` / `tip_kernel` — kernel version strings
 - `comparisons` — list of `MetricComparison` (one per benchmark metric)
 - `regressions` — property that filters to only regressed metrics
+- `improvements` — property that filters to only improved metrics
 
 Each `MetricComparison` contains:
 - `metric`, `unit`, `more_is_better` — metric identity
 - `base` / `tip` — `MetricStats` with `mean`, `median`, `stddev`, `cv`, `values`
 - `pct_change`, `t_pvalue`, `u_pvalue`, `cohens_d` — statistical results
 - `is_regression` — boolean flag
+- `is_improvement` — boolean flag (significant + meaningful change in the better direction)
 
 Example integration at the `NOTIFICATION HOOK` in `pipeline.py`:
 
