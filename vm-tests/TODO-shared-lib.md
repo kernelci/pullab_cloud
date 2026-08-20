@@ -29,6 +29,7 @@ live only in the shared lib.
 All kernel tests now source the shared lib and keep only their test-specific
 functions in `common_lib.sh`:
 
+- [x] `pgbench-kernel-regression` — pgbench/PostgreSQL functions local.
 - [x] `example-kernel-reboot-test` — no test-specific functions; just sources
       the shared lib.
 - [x] `simple-source-reboot` — source-RPM build helpers
