@@ -167,6 +167,13 @@ Using an explicit configuration file (recommended)
 kernel-ci-cloud-runner aws run --config my-config.json
 ```
 
+To also download this run's result files (benchmark CSVs, `result.txt`, console
+logs) from S3 to a local directory, pass `--results-dir`; files land under
+`DIR/<run_prefix>/` mirroring the bucket layout:
+```
+kernel-ci-cloud-runner aws run --config my-config.json --results-dir ./results
+```
+
 - Check status by pipeline log message: "VMs: X/X spawned, Y successful, 0 failed, 0 missing"
 - **Logs:** `logs/`
 
