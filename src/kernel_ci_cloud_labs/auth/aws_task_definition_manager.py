@@ -39,12 +39,19 @@ class AWSTaskDefinitionManager(BaseResourceManager):
 
         # Add CloudWatch logs configuration
         log_group = f"/ecs/{resource_name}"
+        # The awslogs stream name is "<prefix>/<container-name>/<task-id>".
+        # A per-run prefix (e.g. the run/test id) makes concurrent runs — which
+        # all log into the same /ecs/<family> group — easy to tell apart in
+        # CloudWatch, instead of every task sharing the generic "ecs" prefix.
+        # The <task-id> suffix already guarantees stream uniqueness; the prefix
+        # is purely for human/tool separability. Defaults to "ecs".
+        stream_prefix = resource_config.get("log_stream_prefix", "ecs")
         container_def["logConfiguration"] = {
             "logDriver": "awslogs",
             "options": {
                 "awslogs-group": log_group,
                 "awslogs-region": resource_config.get("region", "us-west-2"),
-                "awslogs-stream-prefix": "ecs",
+                "awslogs-stream-prefix": stream_prefix,
                 "awslogs-create-group": "true",
             },
         }

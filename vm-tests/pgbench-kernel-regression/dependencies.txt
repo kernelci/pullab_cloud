@@ -1,0 +1,5 @@
+# Packages required to run the pgbench PostgreSQL benchmark.
+# Provides initdb, postgres, pgbench, pg_isready, createdb and pg_ctl in /usr/bin.
+postgresql16-server
+postgresql16-contrib
+postgresql16

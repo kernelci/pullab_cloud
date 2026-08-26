@@ -134,9 +134,9 @@ summarize_unixbench_log()
 
     # Parse result lines (first section) - use 6th last as value, 5th last as unit
     in_results && NF >= 6 {
-        # Extract metric name (everything except last 5 fields)
+        # Extract metric name (everything except last 6 fields: value unit (timing info))
         metric = ""
-        for (i = 1; i <= NF-4; i++) {
+        for (i = 1; i <= NF-6; i++) {
             if (metric == "") {
                 metric = $i
             } else {
@@ -151,43 +151,14 @@ summarize_unixbench_log()
         # Clean up metric name
         gsub(/^\s+|\s+$/, "", metric)
 
-        # Determine more_is_better
-        if (metric ~ /System_Call_Overhead/) {
-            more_is_better = "false"
-        } else {
-            more_is_better = "true"
-        }
-
-        printf "%s.%s,%s,%s,%s,%s,%s,%s,%s\n", benchmark_version, metric, unit, value, more_is_better, kernel_version, instance_id, instance_type, arch
-    }
-
-    # Parse index section lines - always use second-to-last column as value
-    in_index && NF >= 3 && !/BASELINE/ && !/RESULT/ && !/INDEX/ && !/^=/ {
-        # Extract metric name (everything except last 2 fields)
-        metric = ""
-        for (i = 1; i <= NF-3; i++) {
-            if (metric == "") {
-                metric = $i
-            } else {
-                metric = metric "_" $i
-            }
-        }
-
-        # Use second-to-last field as value
-        value = $(NF-1)
-
-        # Skip lines with "---" values
-        if (value == "---") {
-            next
-        }
-
-        # Clean up metric name
-        gsub(/^\s+|\s+$/, "", metric)
-
-        unit = "score"
+        # All UnixBench results in this section are throughput rates
+        # (lps/lpm/KBps), so higher is better — including "System Call
+        # Overhead", whose value is syscall round-trips per second (lps).
         more_is_better = "true"
 
         printf "%s.%s,%s,%s,%s,%s,%s,%s,%s\n", benchmark_version, metric, unit, value, more_is_better, kernel_version, instance_id, instance_type, arch
     }
+
+    # Skip index section entirely - do not parse it
     ' "$unixbench_log" >>"$output_csv_file"
 }

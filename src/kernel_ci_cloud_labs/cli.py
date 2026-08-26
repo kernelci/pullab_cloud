@@ -1,7 +1,7 @@
 """CLI entry point for kernel-ci-cloud-runner.
 
 Usage:
-    kernel-ci-cloud-runner aws run [--config CONFIG] [--config-s3 S3_URI]
+    kernel-ci-cloud-runner aws run [--config CONFIG] [--config-s3 S3_URI] [--results-dir DIR]
     kernel-ci-cloud-runner aws analyze --bucket BUCKET --run-prefix PREFIX [--output-dir DIR]
     kernel-ci-cloud-runner aws setup configure [--prefix PREFIX] [--region REGION] [--output FILE]
     kernel-ci-cloud-runner aws setup upload-rpms --bucket BUCKET --local-rpms DIR [--region REGION]
@@ -78,6 +78,48 @@ def cmd_run(args):
     provider = PROVIDER_REGISTRY[config["provider"]](auth, config, storage)
 
     run_pipeline(provider, storage, run_dir=run_dir)
+
+    # Optionally persist all of this run's S3 result objects to a local
+    # directory (benchmark CSVs, result.txt, console logs, etc.). aws run
+    # otherwise only keeps the orchestrator logs under logs/run_*/.
+    if getattr(args, "results_dir", None):
+        _download_run_results(storage, args.results_dir, logger)
+
+
+def _download_run_results(storage, results_dir, logger):
+    """Download every S3 object under this run's prefix into results_dir.
+
+    Preserves the S3 key structure under results_dir/<run_prefix>/ so the
+    layout matches the bucket. Best-effort: logs and continues on error.
+    """
+    import os as _os
+
+    bucket = getattr(storage, "bucket", None)
+    run_prefix = getattr(storage, "run_prefix", None)
+    s3 = getattr(storage, "s3", None)
+    if not (bucket and run_prefix and s3 is not None):
+        logger.warning("Cannot download results: bucket/run_prefix/s3 client unavailable")
+        return
+
+    dest_root = _os.path.join(results_dir, run_prefix)
+    logger.info("Downloading run results from s3://%s/%s/ to %s", bucket, run_prefix, dest_root)
+    count = 0
+    try:
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=f"{run_prefix}/"):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                if key.endswith("/"):
+                    continue
+                # Strip the run_prefix so files land under dest_root/<rest>.
+                rel = key[len(run_prefix) + 1:] if key.startswith(run_prefix + "/") else key
+                local_path = _os.path.join(dest_root, rel)
+                _os.makedirs(_os.path.dirname(local_path), exist_ok=True)
+                s3.download_file(bucket, key, local_path)
+                count += 1
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("Error downloading run results: %s", e)
+    logger.info("✓ Downloaded %d result file(s) to %s", count, dest_root)
 
 
 def cmd_setup_configure(args):
@@ -229,6 +271,11 @@ def main():
         "Takes precedence over --config. Designed for EventBridge triggers.",
     )
     run_parser.add_argument("--region", help="AWS region (for S3 config download)")
+    run_parser.add_argument(
+        "--results-dir",
+        help="Download all of this run's S3 result files (benchmark CSVs, "
+        "result.txt, console logs) into DIR/<run_prefix>/ after the run",
+    )
     run_parser.set_defaults(func=cmd_run)
 
     # aws analyze

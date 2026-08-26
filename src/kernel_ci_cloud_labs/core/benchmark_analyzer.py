@@ -62,12 +62,13 @@ class MetricComparison:
     u_pvalue: float = 1.0
     cohens_d: float = 0.0
     is_regression: bool = False
+    is_improvement: bool = False
 
     def __post_init__(self):
         if self.base.mean != 0:
             self.pct_change = ((self.tip.mean - self.base.mean) / abs(self.base.mean)) * 100.0
         self._compute_tests()
-        self._detect_regression()
+        self._classify_change()
 
     def _compute_tests(self):
         """Compute t-test, Mann-Whitney U, and Cohen's d."""
@@ -82,18 +83,27 @@ class MetricComparison:
         # Cohen's d (pooled)
         self.cohens_d = _cohens_d(base_v, tip_v)
 
-    def _detect_regression(self):
-        """A regression requires significant p-value AND meaningful effect size."""
+    def _classify_change(self):
+        """Classify the change as a regression or an improvement.
+
+        Both require a significant p-value AND a meaningful effect size; they
+        differ only in direction. A metric moving the "worse" way (down when
+        more_is_better, up when less_is_better) is a regression; moving the
+        "better" way is an improvement. Changes that are not both significant
+        and meaningful are neither (treated as noise).
+        """
+        self.is_regression = False
+        self.is_improvement = False
         significant = self.t_pvalue < P_VALUE_THRESHOLD or self.u_pvalue < P_VALUE_THRESHOLD
         meaningful = abs(self.cohens_d) >= COHENS_D_THRESHOLD
         if not (significant and meaningful):
-            self.is_regression = False
             return
-        # Direction check: regression means performance got worse
-        if self.more_is_better:
-            self.is_regression = self.pct_change < 0
+        # pct_change > 0 means tip is larger than base.
+        got_better = (self.pct_change > 0) if self.more_is_better else (self.pct_change < 0)
+        if got_better:
+            self.is_improvement = True
         else:
-            self.is_regression = self.pct_change > 0
+            self.is_regression = True
 
 
 @dataclass
@@ -113,6 +123,14 @@ class TestBenchmarkResult:
     def has_regression(self) -> bool:
         return len(self.regressions) > 0
 
+    @property
+    def improvements(self) -> List[MetricComparison]:
+        return [c for c in self.comparisons if c.is_improvement]
+
+    @property
+    def has_improvement(self) -> bool:
+        return len(self.improvements) > 0
+
 
 @dataclass
 class PipelineBenchmarkSummary:
@@ -125,6 +143,8 @@ class PipelineBenchmarkSummary:
     failed_test_names: List[str] = field(default_factory=list)
     tests_with_regression: int = 0
     regression_test_names: List[str] = field(default_factory=list)
+    tests_with_improvement: int = 0
+    improvement_test_names: List[str] = field(default_factory=list)
 
 
 class BenchmarkAnalyzer:
@@ -159,6 +179,9 @@ class BenchmarkAnalyzer:
                 if result.has_regression:
                     summary.tests_with_regression += 1
                     summary.regression_test_names.append(test_name)
+                if result.has_improvement:
+                    summary.tests_with_improvement += 1
+                    summary.improvement_test_names.append(test_name)
 
         return summary
 
@@ -442,15 +465,38 @@ def log_benchmark_summary(summary: PipelineBenchmarkSummary):
         else:
             logger.info("  ✓ No regressions detected")
 
+        if result.improvements:
+            logger.info("  ✓ IMPROVEMENTS DETECTED: %d", len(result.improvements))
+            for c in result.improvements:
+                logger.info(
+                    "    %s: base=%.2f±%.2f (cv: %.2f) → tip=%.2f±%.2f (cv: %.2f) %s (%+.1f%%) "
+                    "[t-test p=%.4f, U-test p=%.4f, Cohen's d=%.2f]",
+                    c.metric,
+                    c.base.mean,
+                    c.base.stddev,
+                    c.base.cv,
+                    c.tip.mean,
+                    c.tip.stddev,
+                    c.tip.cv,
+                    c.unit,
+                    c.pct_change,
+                    c.t_pvalue,
+                    c.u_pvalue,
+                    c.cohens_d,
+                )
+
     logger.info("")
     logger.info("-" * 60)
     logger.info(
-        "Tests with benchmarks: %d | Regressions found: %d",
+        "Tests with benchmarks: %d | Regressions found: %d | Improvements found: %d",
         len(summary.test_results),
         summary.tests_with_regression,
+        summary.tests_with_improvement,
     )
     if summary.regression_test_names:
         logger.info("Tests with regressions: %s", ", ".join(summary.regression_test_names))
+    if summary.improvement_test_names:
+        logger.info("Tests with improvements: %s", ", ".join(summary.improvement_test_names))
     logger.info("=" * 60)
 
     # NOTIFICATION HOOK: Add downstream notifications here, e.g.:

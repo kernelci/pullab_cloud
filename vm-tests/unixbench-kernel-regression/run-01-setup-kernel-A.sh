@@ -18,7 +18,7 @@ install_test_dependencies
 prepare_unixbench
 
 # Save kernel version before
-kernel_before="$(get_running_kernel)"
+kernel_before="$(get_running_kernel_id)"
 echo "Kernel before installation: $kernel_before"
 save_kernel_version "$kernel_before" "$KERNEL_FILE"
 

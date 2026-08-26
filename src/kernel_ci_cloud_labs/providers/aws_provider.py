@@ -11,6 +11,8 @@ import os
 import re
 import time
 
+import botocore.exceptions
+
 from kernel_ci_cloud_labs.core.base_provider import BaseProvider
 from kernel_ci_cloud_labs.core.logging_config import get_logger
 from kernel_ci_cloud_labs.core.registry import register_provider
@@ -311,7 +313,10 @@ class AWSProvider(BaseProvider):
           finishes the kernelci-api node incomplete/Infrastructure with the
           matched line surfaced in error_msg.
         * No new VM console output for PULLAB_TASK_HANG_THRESHOLD_SEC seconds
-          (default 600) -- silent stall, same treatment as a crash.
+          (default 1200) -- silent stall, same treatment as a crash. The
+          default accommodates CPU-heavy benchmarks (e.g. UnixBench) whose
+          console goes quiet for many minutes during a run; lower it via the
+          env var for faster hang detection on lighter workloads.
         * Overall PULLAB_TASK_WAIT_TIMEOUT_SEC seconds elapsed (default 3600)
           -- final safety net for whatever isn't covered above.
 
@@ -331,7 +336,7 @@ class AWSProvider(BaseProvider):
 
         poll_interval = float(os.getenv("PULLAB_TASK_POLL_INTERVAL_SEC") or 30)
         log_interval = float(os.getenv("PULLAB_TASK_PROGRESS_LOG_SEC") or 120)
-        hang_threshold = float(os.getenv("PULLAB_TASK_HANG_THRESHOLD_SEC") or 600)
+        hang_threshold = float(os.getenv("PULLAB_TASK_HANG_THRESHOLD_SEC") or 1200)
         overall_timeout = float(os.getenv("PULLAB_TASK_WAIT_TIMEOUT_SEC") or 3600)
 
         start = time.time()
@@ -375,9 +380,31 @@ class AWSProvider(BaseProvider):
 
             # Tail the VM console group for crash patterns / progress.
             if cw_manager is not None:
-                new_events = cw_manager.get_logs_with_filter(
-                    start_time=last_event_ms + 1
-                ) or []
+                log_fetch_ok = True
+                try:
+                    new_events = cw_manager.get_logs_with_filter(
+                        start_time=last_event_ms + 1
+                    ) or []
+                except botocore.exceptions.ClientError as e:
+                    # A transient failure retrieving logs (most commonly an
+                    # ExpiredTokenException while the credential provider is
+                    # mid-refresh) must NOT be treated as "no console output":
+                    # otherwise the hang timer keeps advancing and could
+                    # false-positive kill a healthy run. Refresh the logs
+                    # client, skip the hang check this cycle, and retry next
+                    # poll once fresh credentials are resolved.
+                    log_fetch_ok = False
+                    new_events = []
+                    code = e.response.get("Error", {}).get("Code", "")
+                    logger.warning(
+                        "Transient error tailing VM logs (%s); refreshing logs "
+                        "client and pausing hang detection this cycle", code or e,
+                    )
+                    try:
+                        cw_manager.client = self.auth.get_client("logs")
+                    except Exception as refresh_e:  # pylint: disable=broad-exception-caught
+                        logger.warning("Could not refresh logs client: %s", refresh_e)
+
                 if new_events:
                     last_event_seen_at = time.time()
                     for ev in new_events:
@@ -393,6 +420,10 @@ class AWSProvider(BaseProvider):
                         )
                         self.terminate_container()
                         raise RuntimeError(f"kernel crash detected in VM: {msg}")
+                elif not log_fetch_ok:
+                    # Log retrieval failed transiently: don't let the hang timer
+                    # advance across this window. Treat it as "activity seen".
+                    last_event_seen_at = time.time()
                 elif (time.time() - last_event_seen_at) > hang_threshold:
                     logger.error(
                         "No VM console output for %ds (hang threshold %ds) — stopping task",
