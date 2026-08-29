@@ -175,6 +175,25 @@ class VMLauncher:
             log_error(f"Failed to resolve SSM parameter {parameter_name}: {e}")
             raise
 
+    def _supports_nested_virtualization(self):
+        """Check if the instance type supports nested virtualization.
+
+        AWS supports nested virtualization on C8i, M8i, R8i, C7i, M7i, R7i
+        and related instance families.
+        Returns True if the current instance_type belongs to a supported family.
+
+        See: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/amazon-ec2-nested-virtualization.html
+        """
+        nested_families = (
+            "c8i", "m8i", "r8i", "c8id", "m8id", "r8id",
+            "c8i-flex", "m8i-flex", "r8i-flex", "x8i",
+            "c7i", "m7i", "r7i", "c7id", "m7id", "r7id",
+            "c7i-flex", "m7i-flex", "i7i",
+        )
+        # Extract family: e.g. "c8i.4xlarge" -> "c8i"
+        instance_family = self.instance_type.rsplit(".", 1)[0].lower()
+        return instance_family in nested_families
+
     def prepare_test_artifacts(self):
         """Verify test payload zip exists in S3."""
         log_info(f"\n=== Verifying test artifacts for {self.test} ===")
@@ -253,6 +272,12 @@ echo "✓ SSM agent is ready"
         }
 
         params["IamInstanceProfile"] = {"Name": self.role_name}
+
+        # Enable nested virtualization for instance families that support it.
+        # Required for KVM/Hyper-V workloads inside the EC2 instance.
+        if self._supports_nested_virtualization():
+            params["CpuOptions"] = {"NestedVirtualization": "enabled"}
+            log_info(f"Nested virtualization enabled for {self.instance_type}")
 
         log_not("Calling run_instances...")
         response = self.ec2.run_instances(**params)
