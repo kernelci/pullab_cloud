@@ -12,6 +12,7 @@ See the main [README](../README.md) for writing new tests, configuration, and th
 | `example-kernel-reboot-test` | 3 | yes | Installs two kernels with reboot between each |
 | `simple-unixbench` | 1 | no | Runs UnixBench on the default kernel |
 | `unixbench-kernel-regression` | 3 | yes | Installs two kernels, runs UnixBench on each, produces benchmark CSVs |
+| `pgbench-kernel-regression` | 3 | yes | Installs two kernels, runs PostgreSQL pgbench (read-only + read-write) on each, produces benchmark CSVs |
 | `simple-source-reboot` | 2 | yes | Installs kernel from source RPM, reboots, verifies |
 
 ## How Multi-Stage Tests Work
