@@ -41,14 +41,23 @@ install_source_kernel_rpm()
     echo "Installing kernel source from $kernel_src_rpm"
 
     # Install source RPM (extracts to ~/rpmbuild/SOURCES and ~/rpmbuild/SPECS)
-    # Suppress mockbuild user warnings (harmless - files owned by root instead)
+    # Suppress mockbuild user warnings
     if rpm -ivh "$kernel_src_rpm" 2>&1 | grep -v "user mockbuild\|group mock"; then
         echo "✓ Kernel source installed to ~/rpmbuild/"
 
-        # Auto-install build dependencies from spec file
+        # Discover spec file dynamically, to cover e.g. kernel6.18.spec
+        local spec
+        spec=$(find "$HOME/rpmbuild/SPECS" -maxdepth 1 -name '*.spec' 2>/dev/null | head -1)
+        if [ -z "$spec" ]; then
+            echo "ERROR: no .spec found in ~/rpmbuild/SPECS after installing src RPM" >&2
+            return 1
+        fi
+        echo "Found spec: $spec"
+
+        # Auto-install build dependencies from the spec file
         echo "Installing build dependencies..."
-        if sudo yum-builddep -y ~/rpmbuild/SPECS/kernel.spec 2>/dev/null ||
-            sudo dnf builddep -y ~/rpmbuild/SPECS/kernel.spec 2>/dev/null; then
+        if sudo yum-builddep -y "$spec" 2>/dev/null ||
+            sudo dnf builddep -y "$spec" 2>/dev/null; then
             echo "✓ Build dependencies installed"
         else
             echo "WARNING: Could not auto-install build dependencies"
@@ -66,14 +75,17 @@ build_kernel_rpm_src()
 {
     echo "Building binary kernel RPM from source..."
 
-    if [ ! -f ~/rpmbuild/SPECS/kernel.spec ]; then
-        echo "ERROR: kernel.spec not found in ~/rpmbuild/SPECS/" >&2
+    # iDiscover spec file dynamically, to cover e.g. kernel6.18.spec
+    local spec
+    spec=$(find "$HOME/rpmbuild/SPECS" -maxdepth 1 -name '*.spec' 2>/dev/null | head -1)
+    if [ -z "$spec" ]; then
+        echo "ERROR: no .spec found in ~/rpmbuild/SPECS/" >&2
         return 1
     fi
 
     cd ~/rpmbuild/SPECS
 
-    if rpmbuild -bb kernel.spec --with baseonly --without debug --without debuginfo; then
+    if rpmbuild -bb "$(basename "$spec")" --with baseonly --without debug --without debuginfo; then
         echo "✓ Kernel built successfully"
         return 0
     else
@@ -122,12 +134,18 @@ install_and_build_kernel()
 
     echo "Step 3: Installing built kernel..."
     local built_kernel
-    built_kernel=$(ls -t ~/rpmbuild/RPMS/$(uname -m)/kernel-[0-9]*.rpm | head -1)
+    # The built main-kernel RPM is named after the source package, which may
+    # carry a suffix. Exclude sub-packages (headers/devel/tools/modules*/livepatch/perf/bpftool/python3).
+    built_kernel=$(ls -t ~/rpmbuild/RPMS/"$(uname -m)"/kernel*-[0-9]*.rpm 2>/dev/null |
+        grep -Ev -- '-(headers|devel|tools|tools-devel|modules|modules-extra|modules-extra-common|livepatch|debug|debuginfo)-' |
+        grep -Ev -- '(^|/)(perf|bpftool|python3-perf)' |
+        head -1)
 
     if [ -z "$built_kernel" ]; then
         echo "ERROR: No built kernel RPM found"
         return 1
     fi
+    echo "Selected built kernel RPM: $built_kernel"
 
     install_kernel_rpm "$built_kernel" || return 1
 
