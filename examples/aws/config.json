@@ -219,7 +219,7 @@
     "vms": [
       {
         "ami_id": "resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64",
-        "instance_type": "c5a.4xlarge",
+        "instance_type": "c8i.4xlarge",
         "root_volume_size": 40,
         "max_runtime": 3600,
         "test": [
@@ -229,7 +229,7 @@
       },
       {
         "ami_id": "resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64",
-        "instance_type": "c5a.4xlarge",
+        "instance_type": "c8i.4xlarge",
         "root_volume_size": 40,
         "max_runtime": 3600,
         "test": [
