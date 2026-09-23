@@ -1,0 +1,4 @@
+{
+  "kernel-rpms/src": false,
+  "kernel-rpms/binary": true
+}
