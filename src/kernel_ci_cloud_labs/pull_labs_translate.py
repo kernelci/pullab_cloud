@@ -16,6 +16,7 @@ Reference for the pullab_cloud config schema:
 """
 
 import copy
+import json
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -41,7 +42,7 @@ DEFAULT_PLATFORM_MAP: Dict[str, Dict[str, str]] = {
 # Extend via test_type_map argument; unknown types fall back to "url-kernel-boot".
 DEFAULT_TEST_TYPE_MAP: Dict[str, str] = {
     "baseline": "url-kernel-boot",
-    "ltp": "url-kernel-boot",
+    "ltp": "ltp",
     "unixbench": "url-kernel-boot",
 }
 
@@ -128,6 +129,21 @@ def translate_job(
         test_params["PULL_LABS_TESTS"] = ",".join(
             f"{t.get('id', t.get('type', 'unknown'))}:{t.get('type', 'unknown')}"
             for t in job_tests
+        )
+        # Full test descriptions, including the free-form `parameters` string
+        # the id:type pairs above cannot carry; PULL_LABS_TESTS is kept for
+        # compatibility with existing vm-tests.
+        test_params["PULL_LABS_TESTS_JSON"] = json.dumps(
+            [
+                {
+                    "id": t.get("id", t.get("type", "unknown")),
+                    "type": t.get("type", "unknown"),
+                    "parameters": t.get("parameters", ""),
+                    "timeout_s": t.get("timeout_s"),
+                }
+                for t in job_tests
+            ],
+            separators=(",", ":"),
         )
 
     timeout = jobdef.get("timeout") or 3600

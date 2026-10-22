@@ -126,7 +126,7 @@ It **never** returns `"incomplete"` - that value is reserved for infrastructure 
 | `x86_64`          | `c5a.4xlarge`  | AL2023 `...al2023-ami-kernel-default-x86_64`       |
 | `arm64`/`aarch64` | `c6g.4xlarge`  | AL2023 `...al2023-ami-kernel-default-arm64`        |
 
-`DEFAULT_TEST_TYPE_MAP`: `baseline`, `ltp`, `unixbench` all map to `url-kernel-boot`. Unknown types fall back to `url-kernel-boot` via `_resolve_test_dir`, which uses `test_type_map["_default"]` if present, else the literal `"url-kernel-boot"`.
+`DEFAULT_TEST_TYPE_MAP`: `ltp` maps to the `ltp` vm-test; `baseline` and `unixbench` map to `url-kernel-boot`. Unknown types fall back to `url-kernel-boot` via `_resolve_test_dir`, which uses `test_type_map["_default"]` if present, else the literal `"url-kernel-boot"`.
 
 The `test_params` dict carries:
 
@@ -134,6 +134,7 @@ The `test_params` dict carries:
 - `ROOTFS_URL` (only if `artifacts.rootfs` or `artifacts.ramdisk` present).
 - `KERNELCI_NODE_ID` (only if `node_id` was passed).
 - `PULL_LABS_TESTS` (only if the job has tests) - a comma-joined list of `id:type` pairs.
+- `PULL_LABS_TESTS_JSON` (only if the job has tests) - a JSON list of `{id, type, parameters, timeout_s}` objects, carrying the free-form `parameters` string that `PULL_LABS_TESTS` cannot.
 
 The job `timeout` defaults to `3600`, is coerced to `int`, and maps to the VM entry's `max_runtime`. Each job becomes exactly one entry in `test_config.vms[*]` (one VM per job).
 
