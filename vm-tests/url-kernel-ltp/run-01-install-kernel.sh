@@ -1,0 +1,1 @@
+../url-kernel-boot/run-01-install-kernel.sh

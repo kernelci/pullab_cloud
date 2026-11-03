@@ -119,3 +119,16 @@ class TestAWSAuth:
         assert "session" in creds
         assert "region" in creds
         assert creds["region"] == "us-west-2"
+
+
+def test_runner_image_is_pinned_by_digest():
+    auth = object.__new__(AWSAuth)
+    auth.config = {"ecs": {"task_definition": {"family": "t"}}}
+    ecr = Mock()
+    ecr.describe_images.return_value = {"imageDetails": [{"imageDigest": "sha256:" + "d" * 64}]}
+    uri = auth._use_image_digest(  # pylint: disable=protected-access
+        ecr, "repo", "123.dkr.ecr/repo", "latest"
+    )
+    assert uri == "123.dkr.ecr/repo@sha256:" + "d" * 64
+    assert auth.config["ecs"]["task_definition"]["image"] == uri
+    ecr.describe_images.assert_called_once_with(repositoryName="repo", imageIds=[{"imageTag": "latest"}])

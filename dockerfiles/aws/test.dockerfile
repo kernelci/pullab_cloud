@@ -15,6 +15,7 @@ WORKDIR /app
 COPY src/kernel_ci_cloud_labs/__init__.py        /app/kernel_ci_cloud_labs/__init__.py
 COPY src/kernel_ci_cloud_labs/core/__init__.py   /app/kernel_ci_cloud_labs/core/__init__.py
 COPY src/kernel_ci_cloud_labs/core/log_scrub.py  /app/kernel_ci_cloud_labs/core/log_scrub.py
+COPY src/kernel_ci_cloud_labs/kernel_test_results.py /app/kernel_ci_cloud_labs/kernel_test_results.py
 COPY src/kernel_ci_cloud_labs/launch_vm.py       /app/launch_vm.py
 COPY src/kernel_ci_cloud_labs/debug_aws_setup.py /app/debug_aws_setup.py
 

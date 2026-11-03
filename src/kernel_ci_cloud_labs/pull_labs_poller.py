@@ -463,6 +463,19 @@ def _extract_test_results(summary: Dict[str, Any]) -> Tuple[List[Dict[str, Any]]
     for inst in instances:
         test = inst.get("test", "unknown")
         instance_id = inst.get("instance_id", "")
+        # A native test VM that also served a requested boot/baseline test
+        # reports that boot on its own row, so a later LTP failure neither
+        # hides a good boot nor is a bad boot classified as a test failure.
+        if inst.get("boot_status") and _test_name_to_path(test) != "boot":
+            rows.append(
+                {
+                    "name": "boot",
+                    "status": inst["boot_status"],
+                    "instance_id": instance_id,
+                    "id_suffix": f"{instance_id}.boot",
+                    "log_url": url_by_pair.get((test, instance_id)),
+                }
+            )
         rows.append(
             {
                 "name": _test_name_to_path(test),
@@ -894,6 +907,8 @@ class PullLabsPoller:
             build_id = f"{self.kcidb_origin}:unknown_{node_id}"
 
         try:
+            jobdef = dict(jobdef)
+            jobdef.setdefault("kernel_revision", (node.get("data") or {}).get("kernel_revision") or {})
             run_config = translate_job(jobdef, self.base_config, node_id=node_id)
         except ValueError as e:
             logger.error("Translation failed for node %s: %s", node_id, e)
@@ -924,7 +939,7 @@ class PullLabsPoller:
         # KCIDB row is stable across retries (instead of positional `.{idx}`).
         test_rows = []
         for idx, t in enumerate(per_test or []):
-            instance_suffix = t.get("instance_id") or str(idx)
+            instance_suffix = t.get("id_suffix") or t.get("instance_id") or str(idx)
             test_rows.append(
                 build_test_row(
                     origin=self.kcidb_origin,

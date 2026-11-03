@@ -1,0 +1,1 @@
+../url-kernel-boot/run-02-verify-and-test.sh

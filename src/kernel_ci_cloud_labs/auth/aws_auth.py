@@ -289,7 +289,8 @@ class AWSAuth(BaseAuth):
                 logger.debug("Execution role ARN: %s", task_config.get("execution_role_arn"))
 
                 task_manager = AWSTaskDefinitionManager(ecs_client, {})
-                task_manager.ensure_exists(task_config["family"], task_config)
+                task_arn, _ = task_manager.ensure_exists(task_config["family"], task_config)
+                self.config["ecs"]["task_definition"]["arn"] = task_arn
 
                 # Store network manager for later use
                 from kernel_ci_cloud_labs.auth.aws_network_manager import (
@@ -401,12 +402,7 @@ class AWSAuth(BaseAuth):
             try:
                 ecr_client.describe_images(repositoryName=repo_name, imageIds=[{"imageTag": image_tag}])
                 logger.info("✓ Image already exists: %s", image_uri)
-
-                # Update task definition config with existing image
-                if self.config.get("ecs", {}).get("task_definition"):
-                    self.config["ecs"]["task_definition"]["image"] = image_uri
-
-                return image_uri
+                return self._use_image_digest(ecr_client, repo_name, repo_uri, image_tag)
             except ecr_client.exceptions.ImageNotFoundException:
                 logger.info("Image not found, building from %s", dockerfile)
         else:
@@ -450,9 +446,20 @@ class AWSAuth(BaseAuth):
         subprocess.run(["docker", "push", image_uri], check=True)
 
         logger.info("✓ Image pushed: %s", image_uri)
+        return self._use_image_digest(ecr_client, repo_name, repo_uri, image_tag)
 
-        # Update task definition config with new image
+    def _use_image_digest(self, ecr_client, repo_name: str, repo_uri: str, image_tag: str) -> str:
+        """Point the task definition at the tag's current immutable digest.
+
+        A mutable tag such as ``latest`` would let ECS start whatever image
+        the tag names at launch time, and the task-definition drift check
+        could never see the runner change. A digest reference changes with
+        the image, so a new runner registers a new revision.
+        """
+        details = ecr_client.describe_images(repositoryName=repo_name, imageIds=[{"imageTag": image_tag}])
+        digest = details["imageDetails"][0]["imageDigest"]
+        image_uri = f"{repo_uri}@{digest}"
+        logger.info("Runner image pinned: %s:%s -> %s", repo_uri, image_tag, image_uri)
         if self.config.get("ecs", {}).get("task_definition"):
             self.config["ecs"]["task_definition"]["image"] = image_uri
-
         return image_uri

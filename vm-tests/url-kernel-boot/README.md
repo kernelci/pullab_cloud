@@ -1,31 +1,28 @@
-# url-kernel-boot
+# Native KernelCI boot test
 
-A vm-test that downloads a kernel image, modules tarball, and optional
-rootfs from URLs provided in environment variables, then runs a
-benchmark against the resulting environment.
+This test installs the supplied kernel and its modules on a disposable Amazon
+Linux 2023 VM. Stage 1 generates an initramfs with dracut, adds a grubby entry
+and schedules it for exactly one boot (`grub2-reboot`), and lets the VM client
+reboot through SSM exit code 194. A kernel that panics therefore falls back to
+the AMI kernel and fails verification instead of looping. Stage 2
+requires a new boot ID, the release and build version embedded in the supplied
+image, and its SHA256 marker on the kernel command line. AMI fallback fails.
 
-Used by `pull_labs_translate.translate_job` to consume PULL_LABS
-`artifacts.kernel` / `artifacts.modules` / `artifacts.rootfs` URLs from a
-KernelCI job definition.
+Supported images are x86_64 bzImage and arm64 Image or Image.gz. Modules must
+be a tar archive containing exactly the matching lib/modules release tree.
+The AMI userspace and SSM agent remain available for management; the supplied
+kernel must support the VM's root filesystem, storage, networking, EFI, and
+initramfs. Missing drivers or an incompatible image are test failures.
 
-## Environment variables
+Required environment: `KERNEL_URL`, `MODULES_URL`, `ARCH`, and
+`PULL_LABS_TESTS_JSON`. Optional `KERNEL_SHA256` and `MODULES_SHA256` validate
+artifact downloads. The translator constructs these values.
 
-| Variable | Required | Purpose |
-| --- | --- | --- |
-| `KERNEL_URL` | yes | URL to the kernel image (e.g. bzImage / vmlinuz) |
-| `MODULES_URL` | yes | URL to the modules tarball (tar.gz) |
-| `ROOTFS_URL` | no | Optional URL to a rootfs / ramdisk image |
-| `ARCH` | no | Target architecture string (default: `uname -m`) |
-| `KERNELCI_NODE_ID` | no | Job node ID from kernelci-api (recorded in logs) |
-| `PULL_LABS_TESTS` | no | Comma-separated `id:type` list from the job definition |
-| `BOOT_HOOK` | no | Path to an executable that stages the kernel and reboots/kexecs |
+`results_boot.json` records the requested artifact, image hash, release/build,
+boot IDs and command line. `results_error.json` records installation or
+verification failures. The VM client uploads diagnostic results on failure as
+well as success. The AWS runner independently validates the boot evidence;
+`SUCCESS` without evidence cannot pass. No synthetic benchmark CSV is emitted.
 
-## Output
-
-A CSV at `benchmark-tip-<kernel_version>.csv` matching the
-`metric,unit,value,more_is_better,kernel_version,instance_id,instance_type,arch`
-schema consumed by `BenchmarkAnalyzer`.
-
-The scaffold emits a single `pullab.boot_check` row; replace or extend
-the trailing CSV-write block with actual benchmark output (UnixBench,
-LTP, etc.) to produce real results.
+Use `url-kernel-ltp` for jobs requesting LTP. These stages require root and
+modify the bootloader: run them only in disposable test VMs.

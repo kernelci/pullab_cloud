@@ -404,6 +404,23 @@ class TestExtractTestResultsPerInstance:
         assert urls == {"i-aaa": "https://b.s3.eu-west-1.amazonaws.com/a.log",
                         "i-bbb": None}
 
+    def test_native_ltp_instance_also_reports_its_boot(self, tmp_path):
+        summary = {
+            "run_directory": str(tmp_path),
+            "vms": {
+                "instances": [
+                    {"test": "url-kernel-ltp", "instance_id": "i-a", "status": "FAIL", "boot_status": "PASS"},
+                    {"test": "url-kernel-boot", "instance_id": "i-b", "status": "PASS", "boot_status": "PASS"},
+                ],
+            },
+        }
+        rows, _ = _extract_test_results(summary)
+        assert [(r["name"], r["status"], r.get("id_suffix")) for r in rows] == [
+            ("boot", "PASS", "i-a.boot"),
+            ("url-kernel-ltp", "FAIL", None),
+            ("boot", "PASS", None),
+        ]
+
     def test_no_artifacts_json_still_emits_per_instance_rows(self, tmp_path):
         # run_directory exists but artifacts.json never got written
         # (e.g. collect_run_artifacts failed). Each row has log_url=None.

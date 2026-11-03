@@ -13,12 +13,40 @@ from pathlib import Path
 from kernel_ci_cloud_labs.auth.aws_cloudwatch_manager import AWSCloudWatchManager
 from kernel_ci_cloud_labs.core.artifacts import collect_run_artifacts
 from kernel_ci_cloud_labs.core.logging_config import create_run_directory, get_logger
+from kernel_ci_cloud_labs.kernel_test_results import EVIDENCE_MARKER, requires_evidence
 
 logger = get_logger(__name__)
 
 
-def parse_vm_logs(vms_dir):
+def parse_evidence_verdicts(container_log):
+    """Read per-instance native-test verdicts emitted by launch_vm.py.
+
+    Returns ``{instance_id: verdict}``; a missing or unreadable log yields an
+    empty dict, which fails every evidence-requiring instance closed.
+    """
+    verdicts = {}
+    try:
+        content = Path(container_log).read_text(encoding="utf-8")
+    except OSError:
+        return verdicts
+    for line in content.splitlines():
+        if EVIDENCE_MARKER not in line:
+            continue
+        try:
+            verdict = json.loads(line.split(EVIDENCE_MARKER, 1)[1])
+        except ValueError:
+            continue
+        if isinstance(verdict, dict) and verdict.get("instance_id"):
+            verdicts[verdict["instance_id"]] = verdict
+    return verdicts
+
+
+def parse_vm_logs(vms_dir, evidence_tests=(), verdicts=None):
     """Parse VM log files and extract test statistics.
+
+    Instances of a test in *evidence_tests* pass only when *verdicts* (see
+    ``parse_evidence_verdicts``) holds an accepted verdict for that instance;
+    their entry also carries ``boot_status`` from the same verdict.
 
     Expects one ``vms/<instance_id>.log`` per VM (written from CloudWatch
     streams). Boot-console logs written alongside as
@@ -69,7 +97,14 @@ def parse_vm_logs(vms_dir):
                         break
 
             # Check success/failure
-            if "Test execution completed: SUCCESS" in content:
+            passed = "Test execution completed: SUCCESS" in content
+            entry = {"test": test_name, "instance_id": instance_id}
+            if test_name in evidence_tests:
+                verdict = (verdicts or {}).get(instance_id) or {}
+                passed = passed and verdict.get("result") == "PASS"
+                if verdict.get("boot_requested"):
+                    entry["boot_status"] = "PASS" if verdict.get("boot") == "PASS" else "FAIL"
+            if passed:
                 stats["successful"] += 1
                 status = "PASS"
             else:
@@ -79,9 +114,8 @@ def parse_vm_logs(vms_dir):
                     stats["failed_tests"][test_name] = []
                 stats["failed_tests"][test_name].append(instance_id)
 
-            stats["instances"].append(
-                {"test": test_name, "instance_id": instance_id, "status": status}
-            )
+            entry["status"] = status
+            stats["instances"].append(entry)
 
         except Exception as e:
             logger.warning("Could not parse VM log %s: %s", log_file, e)
@@ -184,6 +218,7 @@ def create_summary(
     expected_vm_count=None,
     s3_context=None,
     container_failure_log_url=None,
+    evidence_tests=(),
 ):
     """Create summary.json with VM statistics.
 
@@ -197,6 +232,8 @@ def create_summary(
             it exited non-zero before launching any VM. The KCIDB submitter
             uses this as ``tests[*].log_url`` for the synthetic Infrastructure
             row so users have a link to the actual failure reason.
+        evidence_tests: Test names whose VM success also requires a verified
+            evidence verdict in ``container.log`` (native pull-lab tests).
     """
     end_time = time.time()
     total_runtime = end_time - start_time
@@ -205,7 +242,8 @@ def create_summary(
 
     # Parse VM logs
     vms_dir = Path(run_dir) / "vms"
-    vm_stats = parse_vm_logs(vms_dir)
+    verdicts = parse_evidence_verdicts(Path(run_dir) / "container.log") if evidence_tests else {}
+    vm_stats = parse_vm_logs(vms_dir, evidence_tests=evidence_tests, verdicts=verdicts)
 
     # Determine status based on expected vs actual
     status = "success"
@@ -350,6 +388,7 @@ def run_pipeline(
         test_id = None
         test_names = set()  # Collect unique test names
         expected_vm_count = 0  # Calculate expected VM count
+        evidence_tests = set()  # Tests that must also pass structured verification
         if hasattr(provider, "config") and provider.config:
             test_config = provider.config.get("test_config", {})
             test_id = test_config.get("test_id")
@@ -358,6 +397,8 @@ def run_pipeline(
             vms = test_config.get("vms", [])
             for vm in vms:
                 test_value = vm.get("test")
+                if requires_evidence(vm.get("test_params")):
+                    evidence_tests.update(test_value if isinstance(test_value, list) else [test_value])
                 # Handle list of tests
                 if isinstance(test_value, list):
                     for test_name in test_value:
@@ -749,4 +790,5 @@ def run_pipeline(
             if "container_failure_log_url" in locals()
             else None
         ),
+        evidence_tests=evidence_tests if "evidence_tests" in locals() else (),
     )

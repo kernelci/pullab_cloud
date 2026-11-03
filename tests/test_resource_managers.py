@@ -1,4 +1,5 @@
 """Integration tests for resource managers"""
+# pylint: disable=protected-access
 
 __authors__ = ["Max Hubmann <mxhbm@amazon.de>", "Norbert Manthey <nmanthey@amazon.de>"]
 __copyright__ = "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved."
@@ -6,6 +7,8 @@ __copyright__ = "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserv
 
 
 from unittest.mock import Mock
+import pytest
+from botocore.exceptions import ClientError
 
 from kernel_ci_cloud_labs.auth.aws_cloudwatch_manager import AWSCloudWatchManager
 from kernel_ci_cloud_labs.auth.aws_cluster_manager import AWSClusterManager
@@ -119,7 +122,10 @@ class TestTaskDefinitionManager:
     def test_ensure_exists_creates_missing_task_definition(self):
         """Test that ensure_exists registers task definition when missing"""
         mock_client = Mock()
-        mock_client.describe_task_definition.side_effect = Exception("Not found")
+        mock_client.describe_task_definition.side_effect = ClientError(
+            {"Error": {"Code": "ClientException", "Message": "Unable to describe task definition."}},
+            "DescribeTaskDefinition",
+        )
         mock_client.register_task_definition.return_value = {
             "taskDefinition": {"taskDefinitionArn": "arn:aws:ecs:us-west-2:123:task-definition/test:1"}
         }
@@ -164,7 +170,10 @@ class TestTaskDefinitionManager:
     def test_task_definition_includes_cloudwatch_logs(self):
         """Test that registered task definition includes CloudWatch logs config"""
         mock_client = Mock()
-        mock_client.describe_task_definition.side_effect = Exception("Not found")
+        mock_client.describe_task_definition.side_effect = ClientError(
+            {"Error": {"Code": "ClientException", "Message": "Unable to describe task definition."}},
+            "DescribeTaskDefinition",
+        )
         mock_client.register_task_definition.return_value = {
             "taskDefinition": {"taskDefinitionArn": "arn:aws:ecs:us-west-2:123:task-definition/test:1"}
         }
@@ -193,3 +202,45 @@ class TestTaskDefinitionManager:
         assert container_def["logConfiguration"]["logDriver"] == "awslogs"
         # Log group defaults to /ecs/{family} if not explicitly set
         assert "/ecs/" in container_def["logConfiguration"]["options"]["awslogs-group"]
+
+    @pytest.mark.parametrize("changed_image", [False, True])
+    def test_runner_image_controls_task_revision(self, changed_image):
+        client = Mock()
+        manager = AWSTaskDefinitionManager(client, {})
+        config = {"image": "runner:new", "execution_role_arn": "exec", "task_role_arn": "task"}
+        current = manager._definition("test", config)
+        current.update(status="ACTIVE", taskDefinitionArn="family:1")
+        if changed_image:
+            current["containerDefinitions"][0]["image"] = "runner:old"
+        client.describe_task_definition.return_value = {"taskDefinition": current}
+        client.register_task_definition.return_value = {"taskDefinition": {"taskDefinitionArn": "family:2"}}
+        arn, created = manager.ensure_exists("test", config)
+        assert created is changed_image
+        assert arn == ("family:2" if changed_image else "family:1")
+        assert client.register_task_definition.call_count == int(changed_image)
+        client.deregister_task_definition.assert_not_called()
+
+    def test_aws_normalised_fields_do_not_force_a_new_revision(self):
+        client = Mock()
+        manager = AWSTaskDefinitionManager(client, {})
+        config = {"image": "runner@sha256:abc", "execution_role_arn": "exec", "task_role_arn": "task"}
+        current = manager._definition("test", config)
+        current.update(status="ACTIVE", taskDefinitionArn="family:1", revision=1)
+        container = current["containerDefinitions"][0]
+        # Fields describe_task_definition adds to what was registered.
+        container["logConfiguration"]["secretOptions"] = []
+        container["linuxParameters"].update(capabilities={}, devices=[], tmpfs=[])
+        container.update(cpu=0, portMappings=[], environment=[], mountPoints=[], volumesFrom=[])
+        client.describe_task_definition.return_value = {"taskDefinition": current}
+        arn, created = manager.ensure_exists("test", config)
+        assert (arn, created) == ("family:1", False)
+        client.register_task_definition.assert_not_called()
+
+    def test_access_denied_does_not_register_a_task(self):
+        client = Mock()
+        client.describe_task_definition.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException"}}, "DescribeTaskDefinition"
+        )
+        with pytest.raises(ClientError):
+            AWSTaskDefinitionManager(client, {}).ensure_exists("test", {"image": "runner:new"})
+        client.register_task_definition.assert_not_called()
