@@ -77,6 +77,8 @@ class AWSProvider(BaseProvider):
         logger.info("Using provided auth object to authenticate.")
         logger.debug("Calling auth.authenticate()")
         self.auth.authenticate()
+        task_config = self.config.get("ecs", {}).get("task_definition", {})
+        self.task_definition = task_config.get("arn") or task_config.get("family", self.task_definition)
         logger.debug("Getting ECS client")
         self.ecs = self.auth.get_client("ecs")
         if not self.ecs:
@@ -298,6 +300,13 @@ class AWSProvider(BaseProvider):
             ec2_log_group=ec2_log_group,
         )
 
+    def _default_wait_timeout(self):
+        """Never stop the task before its own VMs' max_runtime can elapse."""
+        vms = ((self.config or {}).get("test_config") or {}).get("vms") or []
+        longest = max((int(vm.get("max_runtime") or 0) for vm in vms), default=0)
+        # Margin covers VM spawn, the kernel reboot, result upload and cleanup.
+        return max(3600, longest + 1800)
+
     def wait_for_task_completion(self):
         """Wait for the ECS task to reach STOPPED, with crash / stall detection.
 
@@ -315,7 +324,8 @@ class AWSProvider(BaseProvider):
           default accommodates CPU-heavy benchmarks (e.g. UnixBench) whose
           console goes quiet for many minutes during a run; lower it via the
           env var for faster hang detection on lighter workloads.
-        * Overall PULLAB_TASK_WAIT_TIMEOUT_SEC seconds elapsed (default 3600)
+        * Overall PULLAB_TASK_WAIT_TIMEOUT_SEC seconds elapsed (default: the
+          longest VM max_runtime plus spawn/cleanup margin, at least 3600)
           -- final safety net for whatever isn't covered above.
 
         Crash detection requires both cloudwatch.log_groups (with an /ec2/
@@ -335,7 +345,7 @@ class AWSProvider(BaseProvider):
         poll_interval = float(os.getenv("PULLAB_TASK_POLL_INTERVAL_SEC") or 30)
         log_interval = float(os.getenv("PULLAB_TASK_PROGRESS_LOG_SEC") or 120)
         hang_threshold = float(os.getenv("PULLAB_TASK_HANG_THRESHOLD_SEC") or 1200)
-        overall_timeout = float(os.getenv("PULLAB_TASK_WAIT_TIMEOUT_SEC") or 3600)
+        overall_timeout = float(os.getenv("PULLAB_TASK_WAIT_TIMEOUT_SEC") or self._default_wait_timeout())
 
         start = time.time()
         start_ms = int(start * 1000)

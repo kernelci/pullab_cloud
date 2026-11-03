@@ -53,6 +53,16 @@ class TestRegistry:
             def save_results(self, data):
                 """Save results"""
 
+            def upload_tests(
+                self,
+                test_name,
+                test_id,
+                test_dir="vm-tests",
+                script_name="test-vm-client.sh",
+            ):
+                """Upload tests"""
+                return True
+
         storage_class = get_storage("test_storage")
         assert storage_class == TestStorage
 
@@ -69,8 +79,13 @@ class TestRegistry:
             def get_credentials(self):
                 """Get credentials"""
 
-            def check_credentials(self):
+            def _check_credentials(self):
                 """Check credentials"""
+                return True
+
+            def resources_were_created(self):
+                """Resources were created"""
+                return False
 
         auth_class = get_auth("test_auth")
         assert auth_class == TestAuth

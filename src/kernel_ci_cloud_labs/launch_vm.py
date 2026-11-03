@@ -19,6 +19,11 @@ import boto3
 from botocore.config import Config
 
 from kernel_ci_cloud_labs.core.log_scrub import scrub_text
+from kernel_ci_cloud_labs.kernel_test_results import (
+    EVIDENCE_MARKER,
+    requires_evidence,
+    verify_test_evidence,
+)
 
 
 # Enable verbose diagnostics by setting KCI_DEBUG=1 (or true/yes/on) on the
@@ -418,19 +423,54 @@ chmod +x /tmp/test-vm-client.sh
             content = obj["Body"].read().decode("utf-8").strip()
             log_not(f"  result.txt: {content}")
 
-            if "SUCCESS" in content:
-                log_not("✓ Test result: SUCCESS")
-                return True
-
-            log_error(f"✗ Test result: {content}")
-            return False
-
         except self.s3.exceptions.NoSuchKey:
+            content = None
             log_error("✗ result.txt not found in S3")
-            return False
         except Exception as e:
             log_error(f"✗ Failed to read result.txt: {e}")
-            return False
+            return self._record_evidence(None) if requires_evidence(self.test_params) else False
+
+        if requires_evidence(self.test_params):
+            return self._record_evidence(content)
+        if content is not None and "SUCCESS" in content:
+            log_not("✓ Test result: SUCCESS")
+            return True
+        if content is not None:
+            log_error(f"✗ Test result: {content}")
+        return False
+
+    def _record_evidence(self, content):
+        """Verify a native kernel test's structured evidence and log the verdict.
+
+        Evidence is checked even without a SUCCESS result so that a booted
+        kernel whose later tests failed still reports its boot outcome. The
+        marker line is the per-instance verdict the pipeline consumes.
+        """
+        prefix = f"{self.run_prefix}/test_{self.test}/output/{self.instance_id}"
+
+        def read_report(filename):
+            try:
+                artifact = self.s3.get_object(Bucket=self.s3_bucket, Key=f"{prefix}/{filename}")
+            except self.s3.exceptions.NoSuchKey as error:
+                raise ValueError(f"VM did not upload {filename}") from error
+            return json.loads(artifact["Body"].read())
+
+        verdict = verify_test_evidence(self.test_params, read_report)
+        if content != "SUCCESS":
+            verdict["result"] = "FAIL"
+            verdict["reason"] = verdict["reason"] or f"VM test result was {content!r}"
+        verdict["instance_id"] = self.instance_id
+        verdict["test"] = self.test
+        # The container log driver splits lines over 16 KiB; keep the verdict
+        # line parseable even when many LTP tests failed.
+        if verdict["reason"] and len(verdict["reason"]) > 2000:
+            verdict["reason"] = verdict["reason"][:2000] + "..."
+        print(EVIDENCE_MARKER + json.dumps(verdict, sort_keys=True), flush=True)
+        if verdict["result"] == "PASS":
+            log_not("✓ Test result: SUCCESS (structured evidence verified)")
+            return True
+        log_error(f"✗ Test evidence rejected (boot={verdict['boot']}): {verdict['reason']}")
+        return False
 
     def capture_console_output(self, reason="cleanup"):
         """Fetch EC2 serial console output (kernel boot log) and upload to S3.
@@ -486,6 +526,11 @@ chmod +x /tmp/test-vm-client.sh
                         InstanceId=self.instance_id, Latest=True
                     )
                     output_b64 = resp.get("Output", "")
+                    if not output_b64:
+                        # A terminated Nitro VM can have no live serial buffer
+                        # while its transition-triggered console snapshot exists.
+                        resp = self.ec2.get_console_output(InstanceId=self.instance_id, Latest=False)
+                        output_b64 = resp.get("Output", "")
                     log_debug(
                         f"get_console_output attempt={attempt} "
                         f"output_len_b64={len(output_b64)} "

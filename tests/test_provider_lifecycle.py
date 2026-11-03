@@ -236,3 +236,12 @@ class TestScanForKernelCrash:
         assert _scan_for_kernel_crash(
             [{}, {"message": None}, {"message": ""}]
         ) is None
+
+
+@pytest.mark.parametrize(
+    "vms, expected",
+    [([], 3600), ([{"max_runtime": 120}], 3600), ([{"max_runtime": 4500}, {"max_runtime": 900}], 6300)],
+)
+def test_default_wait_timeout_covers_vm_max_runtime(vms, expected):
+    provider = AWSProvider(Mock(), {"test_config": {"vms": vms}})
+    assert provider._default_wait_timeout() == expected  # pylint: disable=protected-access

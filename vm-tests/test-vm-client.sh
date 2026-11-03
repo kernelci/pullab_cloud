@@ -336,6 +336,18 @@ if ! aws s3 cp --no-progress "$SCRIPT_OUTPUT_LOG" "s3://$BUCKET_NAME/${S3_PREFIX
 fi
 
 # Check if script failed (not success and not reboot request)
+upload_result_files()
+{
+    # Keep structured boot/LTP diagnostics on failures as well as successes.
+    for results_file in "$TEST_DIR"/results_*; do
+        if [ -f "$results_file" ]; then
+            results_filename=$(basename "$results_file")
+            echo "$(date): [RUN_ID:$RUN_ID] Uploading results file: $results_filename"
+            aws s3 cp --no-progress "$results_file" "s3://$BUCKET_NAME/${S3_PREFIX}/output/$INSTANCE_ID/$results_filename" || true
+        fi
+    done
+}
+
 if [ $SCRIPT_EXIT_CODE -ne 0 ] && [ $SCRIPT_EXIT_CODE -ne 194 ]; then
     echo "$(date): [RUN_ID:$RUN_ID] ERROR: Script failed - stopping execution chain"
 
@@ -364,6 +376,7 @@ EOF
     # Upload failure status files
     aws s3 cp --no-progress "$LOG_DIR/result.txt" "s3://$BUCKET_NAME/${S3_PREFIX}/output/$INSTANCE_ID/result.txt" || true
     aws s3 cp --no-progress "$LOG_DIR/stats.json" "s3://$BUCKET_NAME/${S3_PREFIX}/output/$INSTANCE_ID/stats.json" || true
+    upload_result_files
 
     echo "$(date): [RUN_ID:$RUN_ID] Test execution failed: $RESULT"
 
@@ -421,16 +434,7 @@ EOF
         fi
     done
 
-    # Upload all results_* files from the test directory
-    for results_file in "$TEST_DIR"/results_*; do
-        if [ -f "$results_file" ]; then
-            results_filename=$(basename "$results_file")
-            echo "$(date): [RUN_ID:$RUN_ID] Uploading results file: $results_filename"
-            if ! aws s3 cp --no-progress "$results_file" "s3://$BUCKET_NAME/${S3_PREFIX}/output/$INSTANCE_ID/$results_filename"; then
-                echo "$(date): [RUN_ID:$RUN_ID] WARNING: Failed to upload $results_filename"
-            fi
-        fi
-    done
+    upload_result_files
 
     echo "$(date): [RUN_ID:$RUN_ID] Test execution completed: $RESULT"
 
